@@ -1,21 +1,24 @@
 import type { Metadata } from "next";
+import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
+import { getProfileStatus } from "@/app/actions/profile";
+import HomeClient from "./HomeClient";
 
 export const metadata: Metadata = {
   title: "Home — MeetingRooms",
   description: "Manage and book DMRC meeting rooms.",
 };
 
-export default function HomePage() {
-  return (
-    <main className="min-h-screen flex items-center justify-center px-4">
-      <div className="text-center">
-        <h1 className="text-3xl font-bold text-gray-900 mb-2">
-          Welcome to MeetingRooms 👋
-        </h1>
-        <p className="text-gray-500 text-sm">
-          You have successfully signed in.
-        </p>
-      </div>
-    </main>
-  );
+export default async function HomePage() {
+  const cookieStore = await cookies();
+  const email = cookieStore.get("mr_email")?.value;
+
+  // If no session cookie, bounce back to login
+  if (!email) {
+    redirect("/");
+  }
+
+  const isFirstLogin = await getProfileStatus(email);
+
+  return <HomeClient isFirstLogin={isFirstLogin} email={email} />;
 }
