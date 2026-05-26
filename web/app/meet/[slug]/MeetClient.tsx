@@ -249,12 +249,11 @@ function PreMeetingGate({
               </button>
             </>
           ) : (
-            <></>
-            // <div className="rounded-full border border-white/10 bg-white/6 px-5 py-3 text-sm text-white/72">
-            //   {isCheckingEarlyJoin
-            //     ? "Checking whether the host has started early..."
-            //     : "Countdown updates automatically."}
-            // </div>
+            <div className="rounded-full border border-white/10 bg-white/6 px-5 py-3 text-sm text-white/72">
+              {isCheckingEarlyJoin
+                ? "Checking whether the host has started early..."
+                : "Countdown updates automatically."}
+            </div>
           )}
         </div>
       </div>

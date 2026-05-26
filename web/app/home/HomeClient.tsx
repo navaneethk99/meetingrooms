@@ -25,6 +25,18 @@ interface Props {
   isAdmin: boolean;
 }
 
+function formatTime12Hour(time24: string) {
+  const parts = time24.split(":");
+  if (parts.length < 2) return time24;
+  const h = parseInt(parts[0], 10);
+  const m = parseInt(parts[1], 10);
+  if (isNaN(h) || isNaN(m)) return time24;
+  const ampm = h >= 12 ? "PM" : "AM";
+  const h12 = h % 12 || 12;
+  const mPad = String(m).padStart(2, "0");
+  return `${h12}:${mPad} ${ampm}`;
+}
+
 export default function HomeClient({
   isFirstLogin,
   email,
@@ -60,6 +72,40 @@ export default function HomeClient({
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [isPendingLogout, startLogoutTransition] = useTransition();
   const timelineScrollRef = useRef<HTMLDivElement | null>(null);
+  const [meetUrl, setMeetUrl] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [shared, setShared] = useState(false);
+  const [lockMeeting, setLockMeeting] = useState(false);
+  const [requireSignIn, setRequireSignIn] = useState(false);
+  const [generatedPassword, setGeneratedPassword] = useState("");
+  const [successMeetInfo, setSuccessMeetInfo] = useState<{
+    title: string;
+    startTime: string;
+    endTime: string;
+    url: string;
+    password?: string | null;
+    requireSignIn?: boolean;
+  } | null>(null);
+
+  const resetOnlineMeetingState = () => {
+    setMeetUrl(null);
+    setCopied(false);
+    setShared(false);
+    setLockMeeting(false);
+    setRequireSignIn(false);
+    setGeneratedPassword("");
+    setSuccessMeetInfo(null);
+  };
+
+  const openBookingModalDialog = () => {
+    resetOnlineMeetingState();
+    setOpenBookingModal(true);
+  };
+
+  const closeBookingModal = () => {
+    resetOnlineMeetingState();
+    setOpenBookingModal(false);
+  };
 
   // Load Bookings for the selected date
   const loadBookingsForDate = async (dateStr: string) => {
@@ -221,7 +267,7 @@ export default function HomeClient({
             requireSignIn: res.bookingRequireSignIn || false,
           });
         } else {
-          setOpenBookingModal(false);
+          closeBookingModal();
         }
         return null; // Clear state on success
       }
@@ -231,34 +277,6 @@ export default function HomeClient({
       return { message: "An unexpected error occurred. Please try again." };
     }
   }, null);
-
-  // Online meeting states
-  const [meetUrl, setMeetUrl] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [shared, setShared] = useState(false);
-  const [lockMeeting, setLockMeeting] = useState(false);
-  const [requireSignIn, setRequireSignIn] = useState(false);
-  const [generatedPassword, setGeneratedPassword] = useState("");
-  const [successMeetInfo, setSuccessMeetInfo] = useState<{
-    title: string;
-    startTime: string;
-    endTime: string;
-    url: string;
-    password?: string | null;
-    requireSignIn?: boolean;
-  } | null>(null);
-
-  const formatTime12Hour = (time24: string) => {
-    const parts = time24.split(":");
-    if (parts.length < 2) return time24;
-    const h = parseInt(parts[0], 10);
-    const m = parseInt(parts[1], 10);
-    if (isNaN(h) || isNaN(m)) return time24;
-    const ampm = h >= 12 ? "PM" : "AM";
-    const h12 = h % 12 || 12;
-    const mPad = String(m).padStart(2, "0");
-    return `${h12}:${mPad} ${ampm}`;
-  };
 
   const generateRandomPassword = () => {
     const bytes = new Uint8Array(16);
@@ -348,24 +366,14 @@ export default function HomeClient({
   };
 
   useEffect(() => {
-    if (!openBookingModal) {
-      setMeetUrl(null);
-      setCopied(false);
-      setShared(false);
-      setLockMeeting(false);
-      setRequireSignIn(false);
-      setGeneratedPassword("");
-      setSuccessMeetInfo(null);
-    }
-  }, [openBookingModal]);
-
-  useEffect(() => {
-    // Reset meetUrl when error message is cleared
     if (!bookingState?.message) {
-      setMeetUrl(null);
-      setCopied(false);
-      setShared(false);
-      setSuccessMeetInfo(null);
+      const timer = window.setTimeout(() => {
+        setMeetUrl(null);
+        setCopied(false);
+        setShared(false);
+        setSuccessMeetInfo(null);
+      }, 0);
+      return () => window.clearTimeout(timer);
     }
   }, [bookingState]);
 
@@ -836,7 +844,7 @@ export default function HomeClient({
               {/* Book Room Button */}
               <button
                 id="book-room-btn"
-                onClick={() => setOpenBookingModal(true)}
+                onClick={openBookingModalDialog}
                 className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white text-sm font-semibold shadow-sm shadow-blue-500/10 hover:shadow-md transition-all duration-200 flex items-center gap-2 cursor-pointer"
               >
                 <svg
@@ -1080,7 +1088,7 @@ export default function HomeClient({
                 Book a Meeting Room
               </h2>
               <button
-                onClick={() => setOpenBookingModal(false)}
+                onClick={closeBookingModal}
                 className="w-8 h-8 rounded-lg border border-gray-100 hover:bg-gray-50 flex items-center justify-center text-gray-400 hover:text-gray-600 transition-colors cursor-pointer"
                 aria-label="Close modal"
               >
@@ -1275,7 +1283,7 @@ export default function HomeClient({
 
                 <button
                   type="button"
-                  onClick={() => setOpenBookingModal(false)}
+                  onClick={closeBookingModal}
                   className="w-full py-2.5 bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold rounded-xl transition-colors cursor-pointer mt-1"
                 >
                   Done
@@ -1687,7 +1695,7 @@ export default function HomeClient({
                   <div className="flex items-center gap-3 mt-4">
                     <button
                       type="button"
-                      onClick={() => setOpenBookingModal(false)}
+                      onClick={closeBookingModal}
                       className="flex-1 py-2.5 rounded-xl border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm font-semibold transition-colors cursor-pointer"
                     >
                       Cancel
