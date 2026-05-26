@@ -88,3 +88,15 @@ export async function getProfileStatus(email: string): Promise<boolean> {
 
   return rows.length === 0; // true = first login
 }
+
+/** Check if the user is an admin */
+export async function checkAdminStatus(email: string): Promise<boolean> {
+  const rows = await db
+    .select({ isAdmin: users.isAdmin })
+    .from(users)
+    .where(eq(users.email, email))
+    .limit(1);
+
+  return rows.length > 0 ? rows[0].isAdmin : false;
+}
+

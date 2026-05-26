@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useActionState, useState, useEffect, useTransition } from "react";
 import { setupProfile, type ProfileState } from "@/app/actions/profile";
 import { logoutAction } from "@/app/actions/auth";
@@ -14,9 +15,10 @@ import {
 interface Props {
   isFirstLogin: boolean;
   email: string;
+  isAdmin: boolean;
 }
 
-export default function HomeClient({ isFirstLogin, email }: Props) {
+export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
   // First-login modal states
   const open = isFirstLogin;
   const [showPass, setShowPass] = useState(false);
@@ -47,7 +49,10 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
     try {
       const startOfDay = new Date(`${dateStr}T00:00:00`);
       const endOfDay = new Date(`${dateStr}T23:59:59.999`);
-      const data = await getBookings(startOfDay.toISOString(), endOfDay.toISOString());
+      const data = await getBookings(
+        startOfDay.toISOString(),
+        endOfDay.toISOString(),
+      );
       setBookingsList(data);
     } catch (err) {
       console.error("Failed to load bookings:", err);
@@ -61,12 +66,110 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
     CreateBookingState | null,
     FormData
   >(async (prevState, formData) => {
-    const title = formData.get("title") as string;
-    const room = formData.get("room") as string;
-    const dateVal = formData.get("dateInput") as string;
-    const startVal = formData.get("startTimeInput") as string;
-    const endVal = formData.get("endTimeInput") as string;
+    const title = (formData.get("title") as string | null)?.trim() ?? "";
+    const room = (formData.get("room") as string | null) ?? "";
+    const dateVal = (formData.get("dateInput") as string | null) ?? "";
+    const startVal = (formData.get("startTimeInput") as string | null) ?? "";
+    const endVal = (formData.get("endTimeInput") as string | null) ?? "";
 
+    const errors: CreateBookingState["errors"] = {};
+
+    if (!title) {
+      errors.title = "Meeting title is required.";
+    }
+
+    if (!room || !["Room 1", "Room 2", "Room 3"].includes(room)) {
+      errors.room = "Please select a valid room.";
+    }
+
+    if (!dateVal) {
+      errors.date = "Date is required.";
+    } else {
+      const d = new Date(dateVal);
+      if (isNaN(d.getTime())) {
+        errors.date = "Invalid date format.";
+      }
+    }
+
+    if (!startVal) {
+      errors.startTime = "Start time is required.";
+    }
+
+    if (!endVal) {
+      errors.endTime = "End time is required.";
+    }
+
+    if (Object.keys(errors).length > 0) {
+      return { errors };
+    }
+
+    // Convert time "HH:MM" to minutes from midnight
+    const getMinutes = (timeStr: string) => {
+      const parts = timeStr.split(":");
+      if (parts.length < 2) return -1;
+      const h = parseInt(parts[0], 10);
+      const m = parseInt(parts[1], 10);
+      if (isNaN(h) || isNaN(m)) return -1;
+      return h * 60 + m;
+    };
+
+    const startMinutes = getMinutes(startVal);
+    const endMinutes = getMinutes(endVal);
+
+    if (startMinutes === -1) {
+      errors.startTime = "Invalid start time format.";
+    }
+    if (endMinutes === -1) {
+      errors.endTime = "Invalid end time format.";
+    }
+
+    if (Object.keys(errors).length > 0) {
+      return { errors };
+    }
+
+    // Business Hours Validation (08:00 - 20:00)
+    const bizStart = 8 * 60;
+    const bizEnd = 20 * 60;
+
+    if (startMinutes < bizStart || startMinutes >= bizEnd) {
+      errors.startTime = "Start time must be between 08:00 AM and 08:00 PM.";
+    }
+    if (endMinutes <= bizStart || endMinutes > bizEnd) {
+      errors.endTime = "End time must be between 08:00 AM and 08:00 PM.";
+    }
+
+    if (Object.keys(errors).length > 0) {
+      return { errors };
+    }
+
+    if (startMinutes >= endMinutes) {
+      errors.startTime = "Start time must be before end time.";
+    }
+
+    if (Object.keys(errors).length > 0) {
+      return { errors };
+    }
+
+    // Past Date/Time validation (5-minute grace period)
+    const local = new Date();
+    const offset = local.getTimezoneOffset();
+    const localDate = new Date(local.getTime() - offset * 60 * 1000);
+    const todayStr = localDate.toISOString().split("T")[0];
+
+    if (dateVal < todayStr) {
+      errors.date = "Booking date cannot be in the past.";
+    } else if (dateVal === todayStr) {
+      const currentMinutes = local.getHours() * 60 + local.getMinutes();
+      if (startMinutes < currentMinutes - 5) {
+        errors.startTime = "Start time cannot be in the past.";
+      }
+    }
+
+    if (Object.keys(errors).length > 0) {
+      return { errors };
+    }
+
+    // Safe to construct Date objects
     const startLocal = new Date(`${dateVal}T${startVal}:00`);
     const endLocal = new Date(`${dateVal}T${endVal}:00`);
 
@@ -76,13 +179,18 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
     data.set("startTime", startLocal.toISOString());
     data.set("endTime", endLocal.toISOString());
 
-    const res = await createBooking(prevState, data);
-    if (res.success) {
-      await loadBookingsForDate(selectedDate);
-      setOpenBookingModal(false);
-      return null; // Clear state on success
+    try {
+      const res = await createBooking(prevState, data);
+      if (res.success) {
+        await loadBookingsForDate(selectedDate);
+        setOpenBookingModal(false);
+        return null; // Clear state on success
+      }
+      return res;
+    } catch (err) {
+      console.error("Failed to create booking:", err);
+      return { message: "An unexpected error occurred. Please try again." };
     }
-    return res;
   }, null);
 
   useEffect(() => {
@@ -101,7 +209,7 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
     const calculateTimeLine = () => {
       const now = new Date();
       const viewedDate = new Date(`${selectedDate}T00:00:00`);
-      
+
       // Only show current time indicator if viewed date matches local system date
       const isToday =
         now.getFullYear() === viewedDate.getFullYear() &&
@@ -163,7 +271,11 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
   };
 
   // Booking Card Render positioning helper
-  const renderBookingCard = (b: BookingResponse, trackIndex: number, totalTracks: number) => {
+  const renderBookingCard = (
+    b: BookingResponse,
+    trackIndex: number,
+    totalTracks: number,
+  ) => {
     const tStart = new Date(`${selectedDate}T08:00:00`);
     const tEnd = new Date(`${selectedDate}T20:00:00`);
     const bStart = new Date(b.startTime);
@@ -192,17 +304,27 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
     // Dynamic style based on Room
     let themeClasses = "";
     if (b.status === "cancelled") {
-      themeClasses = "from-gray-150 to-gray-200 text-gray-400 border-gray-300 shadow-none hover:from-gray-150 hover:to-gray-200 cursor-not-allowed";
+      themeClasses =
+        "from-gray-150 to-gray-200 text-gray-400 border-gray-300 shadow-none hover:from-gray-150 hover:to-gray-200 cursor-not-allowed";
     } else if (b.room === "Room 1") {
-      themeClasses = "from-blue-500/90 to-indigo-600/90 text-white border-blue-600/20 hover:from-blue-600 hover:to-indigo-700 shadow-md shadow-blue-500/10";
+      themeClasses =
+        "from-blue-500/90 to-indigo-600/90 text-white border-blue-600/20 hover:from-blue-600 hover:to-indigo-700 shadow-md shadow-blue-500/10";
     } else if (b.room === "Room 2") {
-      themeClasses = "from-emerald-500/90 to-teal-600/90 text-white border-emerald-600/20 hover:from-emerald-600 hover:to-teal-700 shadow-md shadow-emerald-500/10";
+      themeClasses =
+        "from-emerald-500/90 to-teal-600/90 text-white border-emerald-600/20 hover:from-emerald-600 hover:to-teal-700 shadow-md shadow-emerald-500/10";
     } else {
-      themeClasses = "from-purple-500/90 to-fuchsia-600/90 text-white border-purple-600/20 hover:from-purple-600 hover:to-fuchsia-700 shadow-md shadow-purple-500/10";
+      themeClasses =
+        "from-purple-500/90 to-fuchsia-600/90 text-white border-purple-600/20 hover:from-purple-600 hover:to-fuchsia-700 shadow-md shadow-purple-500/10";
     }
 
-    const startStr = bStart.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    const endStr = bEnd.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const startStr = bStart.toLocaleTimeString([], {
+      hour: "numeric",
+      minute: "2-digit",
+    });
+    const endStr = bEnd.toLocaleTimeString([], {
+      hour: "numeric",
+      minute: "2-digit",
+    });
 
     // Calculate vertical splitting positioning
     const heightPercent = 100 / totalTracks;
@@ -217,19 +339,25 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
           width: `${width}%`,
           minWidth: "40px",
           top: `calc(${topPercent}% + 4px)`,
-          height: `calc(${heightPercent}% - 8px)`
+          height: `calc(${heightPercent}% - 8px)`,
         }}
         title={`${b.title}\nTime: ${startStr} - ${endStr}\nBooked by: ${b.bookedBy}${b.status === "cancelled" ? " (Cancelled)" : ""}`}
       >
         <div className="flex items-start justify-between gap-1 w-full">
-          <div className={`truncate font-semibold text-xs leading-tight ${b.status === "cancelled" ? "line-through opacity-75" : ""}`}>
+          <div
+            className={`truncate font-semibold text-xs leading-tight ${b.status === "cancelled" ? "line-through opacity-75" : ""}`}
+          >
             {b.status === "cancelled" ? `[Cancelled] ${b.title}` : b.title}
           </div>
-          {b.status === "active" && b.bookedBy === email && (
+          {b.status === "active" && (isAdmin || b.bookedBy === email) && (
             <button
               onClick={async (e) => {
                 e.stopPropagation();
-                if (confirm(`Are you sure you want to cancel the booking "${b.title}"?`)) {
+                if (
+                  confirm(
+                    `Are you sure you want to cancel the booking "${b.title}"?`,
+                  )
+                ) {
                   const res = await cancelBooking(b.id);
                   if (res.success) {
                     await loadBookingsForDate(selectedDate);
@@ -241,7 +369,16 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
               className="w-4 h-4 rounded hover:bg-black/10 flex items-center justify-center text-white/80 hover:text-white transition-colors cursor-pointer flex-shrink-0"
               title="Cancel Booking"
             >
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+              <svg
+                width="10"
+                height="10"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
                 <line x1="18" y1="6" x2="6" y2="18"></line>
                 <line x1="6" y1="6" x2="18" y2="18"></line>
               </svg>
@@ -249,8 +386,16 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
           )}
         </div>
         <div className="flex items-center justify-between text-[10px] opacity-90 truncate gap-2 w-full">
-          <span className={b.status === "cancelled" ? "line-through opacity-75" : ""}>{startStr} - {endStr}</span>
-          <span className="opacity-75 hidden md:inline truncate">{b.bookedBy.split("@")[0]}</span>
+          <span
+            className={
+              b.status === "cancelled" ? "line-through opacity-75" : ""
+            }
+          >
+            {startStr} - {endStr}
+          </span>
+          <span className="opacity-75 hidden md:inline truncate">
+            {b.bookedBy.split("@")[0]}
+          </span>
         </div>
       </div>
     );
@@ -264,12 +409,12 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
       {/* Header Bar */}
       <header className="fixed top-0 left-0 right-0 h-16 bg-white/80 backdrop-blur-md border-b border-gray-200/60 z-30 px-6 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center text-white font-bold text-sm shadow-sm shadow-blue-500/20">
-            MR
-          </div>
-          <span className="font-semibold text-gray-900 tracking-tight">
-            MeetingRooms
-          </span>
+          <Image
+            src="/Delhi_Metro_full_logo.svg"
+            alt="Logo"
+            width={92}
+            height={32}
+          />
         </div>
 
         <div className="flex items-center gap-4">
@@ -290,7 +435,6 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
       {/* Main dashboard space */}
       <main className="min-h-screen pt-24 pb-16 px-4 bg-gray-50/50">
         <div className="max-w-6xl mx-auto flex flex-col gap-6">
-          
           {/* Controls toolbar */}
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-4 rounded-2xl border border-gray-200/60 shadow-sm">
             <div className="flex items-center gap-2">
@@ -299,11 +443,20 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
                 className="w-9 h-9 rounded-lg border border-gray-200 hover:bg-gray-50 flex items-center justify-center text-gray-600 transition-colors cursor-pointer"
                 aria-label="Previous day"
               >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
                   <polyline points="15 18 9 12 15 6" />
                 </svg>
               </button>
-              
+
               <button
                 onClick={setToday}
                 className="px-3 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 text-xs font-semibold text-gray-700 transition-colors cursor-pointer"
@@ -316,14 +469,25 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
                 className="w-9 h-9 rounded-lg border border-gray-200 hover:bg-gray-50 flex items-center justify-center text-gray-600 transition-colors cursor-pointer"
                 aria-label="Next day"
               >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
                   <polyline points="9 18 15 12 9 6" />
                 </svg>
               </button>
 
               {/* Friendly Date Label */}
               <div className="ml-2 flex flex-col">
-                <span className="text-xs text-gray-400 uppercase tracking-wider font-semibold">Selected Date</span>
+                <span className="text-xs text-gray-400 uppercase tracking-wider font-semibold">
+                  Selected Date
+                </span>
                 <span className="text-sm font-semibold text-gray-800 leading-tight">
                   {formatFriendlyDate(selectedDate)}
                 </span>
@@ -336,7 +500,9 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
                 <input
                   type="date"
                   value={selectedDate}
-                  onChange={(e) => e.target.value && setSelectedDate(e.target.value)}
+                  onChange={(e) =>
+                    e.target.value && setSelectedDate(e.target.value)
+                  }
                   className="px-3.5 py-2.5 rounded-xl border border-gray-200 bg-white text-xs font-medium text-gray-700 hover:bg-gray-50 transition-colors focus:outline-none focus:border-blue-500 cursor-pointer"
                 />
               </div>
@@ -347,7 +513,16 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
                 onClick={() => setOpenBookingModal(true)}
                 className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white text-sm font-semibold shadow-sm shadow-blue-500/10 hover:shadow-md transition-all duration-200 flex items-center gap-2 cursor-pointer"
               >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
                   <line x1="12" y1="5" x2="12" y2="19" />
                   <line x1="5" y1="12" x2="19" y2="12" />
                 </svg>
@@ -359,14 +534,15 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
           {/* Timeline View */}
           {/* Timeline View */}
           <div className="bg-white rounded-2xl border border-gray-200/60 shadow-sm overflow-hidden flex">
-            
             {/* Left Fixed Column: Rooms Info */}
             <div className="w-48 flex-shrink-0 border-r border-gray-100 flex flex-col divide-y divide-gray-100 bg-white z-20">
               {/* Header Cell */}
               <div className="h-12 p-4 flex items-center bg-gray-50/50">
-                <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Rooms</span>
+                <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
+                  Rooms
+                </span>
               </div>
-              
+
               {/* Room cells */}
               {["Room 1", "Room 2", "Room 3"].map((room) => {
                 let roomDesc = "";
@@ -376,14 +552,20 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
                   roomTheme = "bg-blue-50 border-blue-100 text-blue-700";
                 } else if (room === "Room 2") {
                   roomDesc = "12 Seats · Board";
-                  roomTheme = "bg-emerald-50 border-emerald-100 text-emerald-700";
+                  roomTheme =
+                    "bg-emerald-50 border-emerald-100 text-emerald-700";
                 } else {
                   roomDesc = "16 Seats · Projector";
                   roomTheme = "bg-purple-50 border-purple-100 text-purple-700";
                 }
                 return (
-                  <div key={room} className="h-24 p-4 flex flex-col justify-center bg-white">
-                    <span className={`self-start text-xs font-semibold px-2 py-0.5 rounded-full border ${roomTheme} mb-1`}>
+                  <div
+                    key={room}
+                    className="h-24 p-4 flex flex-col justify-center bg-white"
+                  >
+                    <span
+                      className={`self-start text-xs font-semibold px-2 py-0.5 rounded-full border ${roomTheme} mb-1`}
+                    >
                       {room}
                     </span>
                     <span className="text-[10px] text-gray-400 font-medium truncate">
@@ -397,7 +579,6 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
             {/* Right Horizontally Scrollable Column: Timeline Grid */}
             <div className="flex-1 overflow-x-auto">
               <div className="min-w-[1000px] flex flex-col divide-y divide-gray-100">
-                
                 {/* Timeline hour labels header */}
                 <div className="h-12 relative bg-gray-50/50">
                   {/* Horizontal hours labels */}
@@ -409,7 +590,9 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
                         className="absolute top-0 bottom-0 text-[10px] font-semibold text-gray-400 flex items-center justify-center transform -translate-x-1/2"
                         style={{ left: `${left}%` }}
                       >
-                        <span className="bg-white px-1.5 py-0.5 rounded shadow-sm border border-gray-100">{formatHourLabel(h)}</span>
+                        <span className="bg-white px-1.5 py-0.5 rounded shadow-sm border border-gray-100">
+                          {formatHourLabel(h)}
+                        </span>
                       </div>
                     );
                   })}
@@ -417,15 +600,22 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
 
                 {/* Room schedules rows */}
                 {["Room 1", "Room 2", "Room 3"].map((room) => {
-                  const roomBookings = bookingsList.filter((b) => b.room === room);
+                  const roomBookings = bookingsList.filter(
+                    (b) => b.room === room,
+                  );
 
                   // Run track layout algorithm
                   const sortedBookings = [...roomBookings].sort(
-                    (a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime()
+                    (a, b) =>
+                      new Date(a.startTime).getTime() -
+                      new Date(b.startTime).getTime(),
                   );
 
                   const tracks: BookingResponse[][] = [];
-                  const bookingTracks = new Map<number, { trackIndex: number; totalTracks: number }>();
+                  const bookingTracks = new Map<
+                    number,
+                    { trackIndex: number; totalTracks: number }
+                  >();
 
                   for (const b of sortedBookings) {
                     const bStart = new Date(b.startTime).getTime();
@@ -444,7 +634,10 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
                     } else {
                       tracks[assignedTrack].push(b);
                     }
-                    bookingTracks.set(b.id, { trackIndex: assignedTrack, totalTracks: 1 });
+                    bookingTracks.set(b.id, {
+                      trackIndex: assignedTrack,
+                      totalTracks: 1,
+                    });
                   }
 
                   const totalTracksCount = Math.max(1, tracks.length);
@@ -456,8 +649,10 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
                   }
 
                   return (
-                    <div key={room} className="h-24 relative bg-gray-50/10 group">
-                      
+                    <div
+                      key={room}
+                      className="h-24 relative bg-gray-50/10 group"
+                    >
                       {/* Vertical background gridlines */}
                       {HOURS.map((_, i) => {
                         const left = (i / 12) * 100;
@@ -483,19 +678,43 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
                       {/* Render absolute booking blocks */}
                       {loadingBookings ? (
                         <div className="absolute inset-0 flex items-center justify-center bg-white/40 backdrop-blur-[1px] z-10">
-                          <svg className="animate-spin h-5 w-5 text-gray-400" fill="none" viewBox="0 0 24 24">
-                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                          <svg
+                            className="animate-spin h-5 w-5 text-gray-400"
+                            fill="none"
+                            viewBox="0 0 24 24"
+                          >
+                            <circle
+                              className="opacity-25"
+                              cx="12"
+                              cy="12"
+                              r="10"
+                              stroke="currentColor"
+                              strokeWidth="4"
+                            />
+                            <path
+                              className="opacity-75"
+                              fill="currentColor"
+                              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                            />
                           </svg>
                         </div>
                       ) : roomBookings.length > 0 ? (
                         roomBookings.map((b) => {
-                          const info = bookingTracks.get(b.id) || { trackIndex: 0, totalTracks: 1 };
-                          return renderBookingCard(b, info.trackIndex, info.totalTracks);
+                          const info = bookingTracks.get(b.id) || {
+                            trackIndex: 0,
+                            totalTracks: 1,
+                          };
+                          return renderBookingCard(
+                            b,
+                            info.trackIndex,
+                            info.totalTracks,
+                          );
                         })
                       ) : (
                         <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
-                          <span className="text-[10px] font-semibold text-gray-300 uppercase tracking-widest">Available</span>
+                          <span className="text-[10px] font-semibold text-gray-300 uppercase tracking-widest">
+                            Available
+                          </span>
                         </div>
                       )}
                     </div>
@@ -519,7 +738,10 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
           <div className="w-full max-w-md bg-white rounded-2xl border border-gray-200/80 shadow-xl px-8 py-7 animate-in fade-in zoom-in-95 duration-200">
             {/* Modal Header */}
             <div className="flex items-center justify-between mb-5">
-              <h2 id="booking-title" className="text-xl font-semibold text-gray-900 tracking-tight">
+              <h2
+                id="booking-title"
+                className="text-xl font-semibold text-gray-900 tracking-tight"
+              >
                 Book a Meeting Room
               </h2>
               <button
@@ -527,7 +749,16 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
                 className="w-8 h-8 rounded-lg border border-gray-100 hover:bg-gray-50 flex items-center justify-center text-gray-400 hover:text-gray-600 transition-colors cursor-pointer"
                 aria-label="Close modal"
               >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <svg
+                  width="18"
+                  height="18"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
                   <line x1="18" y1="6" x2="6" y2="18" />
                   <line x1="6" y1="6" x2="18" y2="18" />
                 </svg>
@@ -547,18 +778,17 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
             {/* Booking Form */}
             <form
               className="flex flex-col gap-4"
-              onSubmit={async (e) => {
-                e.preventDefault();
-                const form = e.currentTarget;
-                const data = new FormData(form);
-                data.set("room", selectedRoom); // Bind currently chosen card room
-                bookingFormAction(data);
-              }}
+              action={bookingFormAction}
               noValidate
             >
+              <input type="hidden" name="room" value={selectedRoom} />
+
               {/* Meeting Title */}
               <div className="flex flex-col gap-1">
-                <label htmlFor="booking-title-input" className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                <label
+                  htmlFor="booking-title-input"
+                  className="text-xs font-semibold text-gray-500 uppercase tracking-wider"
+                >
                   Meeting Title
                 </label>
                 <input
@@ -566,13 +796,18 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
                   name="title"
                   type="text"
                   className={inputBase}
-                  placeholder="e.g. Daily Standup, Project Kickoff"
                   autoFocus
                   aria-invalid={!!bookingState?.errors?.title}
-                  aria-describedby={bookingState?.errors?.title ? "title-err" : undefined}
+                  aria-describedby={
+                    bookingState?.errors?.title ? "title-err" : undefined
+                  }
                 />
                 {bookingState?.errors?.title && (
-                  <p id="title-err" role="alert" className="text-xs text-red-600 mt-0.5">
+                  <p
+                    id="title-err"
+                    role="alert"
+                    className="text-xs text-red-600 mt-0.5"
+                  >
                     {bookingState.errors.title}
                   </p>
                 )}
@@ -585,9 +820,30 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
                 </label>
                 <div className="grid grid-cols-3 gap-2">
                   {[
-                    { id: "Room 1", capacity: "8 Seats", color: "border-blue-200 hover:border-blue-500 active:bg-blue-50/50", selectedBg: "bg-blue-50/80 border-blue-500 ring-2 ring-blue-500/10 text-blue-900" },
-                    { id: "Room 2", capacity: "12 Seats", color: "border-emerald-200 hover:border-emerald-500 active:bg-emerald-50/50", selectedBg: "bg-emerald-50/80 border-emerald-500 ring-2 ring-emerald-500/10 text-emerald-900" },
-                    { id: "Room 3", capacity: "16 Seats", color: "border-purple-200 hover:border-purple-500 active:bg-purple-50/50", selectedBg: "bg-purple-50/80 border-purple-500 ring-2 ring-purple-500/10 text-purple-900" }
+                    {
+                      id: "Room 1",
+                      capacity: "8 Seats",
+                      color:
+                        "border-blue-200 hover:border-blue-500 active:bg-blue-50/50",
+                      selectedBg:
+                        "bg-blue-50/80 border-blue-500 ring-2 ring-blue-500/10 text-blue-900",
+                    },
+                    {
+                      id: "Room 2",
+                      capacity: "12 Seats",
+                      color:
+                        "border-emerald-200 hover:border-emerald-500 active:bg-emerald-50/50",
+                      selectedBg:
+                        "bg-emerald-50/80 border-emerald-500 ring-2 ring-emerald-500/10 text-emerald-900",
+                    },
+                    {
+                      id: "Room 3",
+                      capacity: "16 Seats",
+                      color:
+                        "border-purple-200 hover:border-purple-500 active:bg-purple-50/50",
+                      selectedBg:
+                        "bg-purple-50/80 border-purple-500 ring-2 ring-purple-500/10 text-purple-900",
+                    },
                   ].map((rm) => {
                     const isSelected = selectedRoom === rm.id;
                     return (
@@ -598,16 +854,26 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
                         className={`border rounded-xl p-3 text-left flex flex-col justify-between cursor-pointer transition-all duration-150 ${isSelected ? rm.selectedBg : "border-gray-200 hover:border-gray-300"}`}
                       >
                         <span className="text-xs font-bold">{rm.id}</span>
-                        <span className="text-[10px] text-gray-400 font-medium">{rm.capacity}</span>
+                        <span className="text-[10px] text-gray-400 font-medium">
+                          {rm.capacity}
+                        </span>
                       </button>
                     );
                   })}
                 </div>
+                {bookingState?.errors?.room && (
+                  <p role="alert" className="text-xs text-red-600 mt-0.5">
+                    {bookingState.errors.room}
+                  </p>
+                )}
               </div>
 
               {/* Date Selection */}
               <div className="flex flex-col gap-1">
-                <label htmlFor="booking-date" className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                <label
+                  htmlFor="booking-date"
+                  className="text-xs font-semibold text-gray-500 uppercase tracking-wider"
+                >
                   Date
                 </label>
                 <input
@@ -617,14 +883,29 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
                   defaultValue={selectedDate}
                   className={inputBase}
                   aria-invalid={!!bookingState?.errors?.date}
+                  aria-describedby={
+                    bookingState?.errors?.date ? "date-err" : undefined
+                  }
                 />
+                {bookingState?.errors?.date && (
+                  <p
+                    id="date-err"
+                    role="alert"
+                    className="text-xs text-red-600 mt-0.5"
+                  >
+                    {bookingState.errors.date}
+                  </p>
+                )}
               </div>
 
               {/* Time Range grid */}
               <div className="grid grid-cols-2 gap-4">
                 {/* Start Time */}
                 <div className="flex flex-col gap-1">
-                  <label htmlFor="booking-start" className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  <label
+                    htmlFor="booking-start"
+                    className="text-xs font-semibold text-gray-500 uppercase tracking-wider"
+                  >
                     Start Time
                   </label>
                   <input
@@ -635,10 +916,16 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
                     max="19:59"
                     className={inputBase}
                     aria-invalid={!!bookingState?.errors?.startTime}
-                    aria-describedby={bookingState?.errors?.startTime ? "start-err" : undefined}
+                    aria-describedby={
+                      bookingState?.errors?.startTime ? "start-err" : undefined
+                    }
                   />
                   {bookingState?.errors?.startTime && (
-                    <p id="start-err" role="alert" className="text-xs text-red-600 mt-0.5">
+                    <p
+                      id="start-err"
+                      role="alert"
+                      className="text-xs text-red-600 mt-0.5"
+                    >
                       {bookingState.errors.startTime}
                     </p>
                   )}
@@ -646,7 +933,10 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
 
                 {/* End Time */}
                 <div className="flex flex-col gap-1">
-                  <label htmlFor="booking-end" className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  <label
+                    htmlFor="booking-end"
+                    className="text-xs font-semibold text-gray-500 uppercase tracking-wider"
+                  >
                     End Time
                   </label>
                   <input
@@ -657,10 +947,16 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
                     max="20:00"
                     className={inputBase}
                     aria-invalid={!!bookingState?.errors?.endTime}
-                    aria-describedby={bookingState?.errors?.endTime ? "end-err" : undefined}
+                    aria-describedby={
+                      bookingState?.errors?.endTime ? "end-err" : undefined
+                    }
                   />
                   {bookingState?.errors?.endTime && (
-                    <p id="end-err" role="alert" className="text-xs text-red-600 mt-0.5">
+                    <p
+                      id="end-err"
+                      role="alert"
+                      className="text-xs text-red-600 mt-0.5"
+                    >
                       {bookingState.errors.endTime}
                     </p>
                   )}
@@ -683,9 +979,24 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
                 >
                   {isBookingPending ? (
                     <>
-                      <svg className="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                      <svg
+                        className="animate-spin h-4 w-4 text-white"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                      >
+                        <circle
+                          className="opacity-25"
+                          cx="12"
+                          cy="12"
+                          r="10"
+                          stroke="currentColor"
+                          strokeWidth="4"
+                        />
+                        <path
+                          className="opacity-75"
+                          fill="currentColor"
+                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                        />
                       </svg>
                       Booking...
                     </>
@@ -730,7 +1041,11 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
               </div>
             )}
 
-            <form className="flex flex-col gap-5" action={formAction} noValidate>
+            <form
+              className="flex flex-col gap-5"
+              action={formAction}
+              noValidate
+            >
               {/* Username */}
               <div className="flex flex-col gap-1.5">
                 <label
@@ -791,13 +1106,31 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
                     className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
                   >
                     {showPass ? (
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <svg
+                        width="16"
+                        height="16"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
                         <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" />
                         <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
                         <line x1="1" y1="1" x2="23" y2="23" />
                       </svg>
                     ) : (
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <svg
+                        width="16"
+                        height="16"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
                         <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
                         <circle cx="12" cy="12" r="3" />
                       </svg>
@@ -843,13 +1176,31 @@ export default function HomeClient({ isFirstLogin, email }: Props) {
                     className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
                   >
                     {showConfirm ? (
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <svg
+                        width="16"
+                        height="16"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
                         <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" />
                         <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
                         <line x1="1" y1="1" x2="23" y2="23" />
                       </svg>
                     ) : (
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <svg
+                        width="16"
+                        height="16"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
                         <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
                         <circle cx="12" cy="12" r="3" />
                       </svg>

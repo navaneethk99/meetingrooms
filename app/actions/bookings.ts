@@ -3,7 +3,7 @@
 import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
 import { db } from "@/db";
-import { bookings } from "@/db/schema";
+import { bookings, users } from "@/db/schema";
 import { and, eq, lt, gt } from "drizzle-orm";
 
 export interface CreateBookingState {
@@ -104,19 +104,36 @@ export async function createBooking(
     };
   }
 
+  // Check if booking starts in the past (allow 5-minute grace period)
+  if (start.getTime() < Date.now() - 5 * 60 * 1000) {
+    return {
+      errors: {
+        startTime: "Start time cannot be in the past.",
+      },
+    };
+  }
+
   // Check for conflicts: existing startTime < new.end AND existing endTime > new.start AND status = 'active'
-  const conflicts = await db
-    .select()
-    .from(bookings)
-    .where(
-      and(
-        eq(bookings.room, room),
-        eq(bookings.status, "active"),
-        lt(bookings.startTime, end),
-        gt(bookings.endTime, start)
+  let conflicts;
+  try {
+    conflicts = await db
+      .select()
+      .from(bookings)
+      .where(
+        and(
+          eq(bookings.room, room),
+          eq(bookings.status, "active"),
+          lt(bookings.startTime, end),
+          gt(bookings.endTime, start)
+        )
       )
-    )
-    .limit(1);
+      .limit(1);
+  } catch (error) {
+    console.error("Database conflict check error:", error);
+    return {
+      message: "Failed to verify room availability due to database error. Please try again.",
+    };
+  }
 
   if (conflicts.length > 0) {
     const conflict = conflicts[0];
@@ -128,14 +145,21 @@ export async function createBooking(
   }
 
   // Insert new booking
-  await db.insert(bookings).values({
-    room,
-    title,
-    startTime: start,
-    endTime: end,
-    bookedBy: email,
-    status: "active",
-  });
+  try {
+    await db.insert(bookings).values({
+      room,
+      title,
+      startTime: start,
+      endTime: end,
+      bookedBy: email,
+      status: "active",
+    });
+  } catch (error) {
+    console.error("Database insert error:", error);
+    return {
+      message: "Failed to save booking in the database. Please try again.",
+    };
+  }
 
   revalidatePath("/home");
   return { success: true };
@@ -149,30 +173,43 @@ export async function cancelBooking(bookingId: number): Promise<{ success: boole
     return { success: false, message: "Session expired. Please sign in again." };
   }
 
-  // Find the booking
-  const rows = await db
-    .select()
-    .from(bookings)
-    .where(eq(bookings.id, bookingId))
-    .limit(1);
+  try {
+    // Find the booking
+    const rows = await db
+      .select()
+      .from(bookings)
+      .where(eq(bookings.id, bookingId))
+      .limit(1);
 
-  if (rows.length === 0) {
-    return { success: false, message: "Booking not found." };
+    if (rows.length === 0) {
+      return { success: false, message: "Booking not found." };
+    }
+
+    const booking = rows[0];
+
+    // Check if user is admin
+    const userRows = await db
+      .select({ isAdmin: users.isAdmin })
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(1);
+    const isAdmin = userRows.length > 0 && userRows[0].isAdmin;
+
+    // Verify ownership or admin status
+    if (booking.bookedBy !== email && !isAdmin) {
+      return { success: false, message: "You are not authorized to cancel this booking." };
+    }
+
+    // Update status to 'cancelled'
+    await db
+      .update(bookings)
+      .set({ status: "cancelled" })
+      .where(eq(bookings.id, bookingId));
+
+    revalidatePath("/home");
+    return { success: true };
+  } catch (error) {
+    console.error("Database cancellation error:", error);
+    return { success: false, message: "Failed to cancel booking due to database error. Please try again." };
   }
-
-  const booking = rows[0];
-
-  // Verify ownership
-  if (booking.bookedBy !== email) {
-    return { success: false, message: "You are not authorized to cancel this booking." };
-  }
-
-  // Update status to 'cancelled'
-  await db
-    .update(bookings)
-    .set({ status: "cancelled" })
-    .where(eq(bookings.id, bookingId));
-
-  revalidatePath("/home");
-  return { success: true };
 }
