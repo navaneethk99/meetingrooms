@@ -78,7 +78,7 @@ export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
       errors.title = "Meeting title is required.";
     }
 
-    if (!room || !["Room 1", "Room 2", "Room 3"].includes(room)) {
+    if (!room || !["Room 1", "Room 2", "Room 3", "Online Meet"].includes(room)) {
       errors.room = "Please select a valid room.";
     }
 
@@ -192,6 +192,78 @@ export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
       return { message: "An unexpected error occurred. Please try again." };
     }
   }, null);
+
+  // Online meeting states
+  const [meetUrl, setMeetUrl] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  // Handle scheduling virtual online meeting
+  const handleScheduleOnlineMeeting = async () => {
+    const titleEl = document.getElementById("booking-title-input") as HTMLInputElement | null;
+    const dateEl = document.getElementById("booking-date") as HTMLInputElement | null;
+    const startEl = document.getElementById("booking-start") as HTMLInputElement | null;
+    const endEl = document.getElementById("booking-end") as HTMLInputElement | null;
+
+    const title = titleEl?.value?.trim() || "Online Meeting";
+    const dateVal = dateEl?.value || "";
+    const startVal = startEl?.value || "";
+    const endVal = endEl?.value || "";
+
+    if (!dateVal || !startVal || !endVal) {
+      alert("Please ensure title, date, start time, and end time are filled out.");
+      return;
+    }
+
+    const startLocal = new Date(`${dateVal}T${startVal}:00`);
+    const endLocal = new Date(`${dateVal}T${endVal}:00`);
+
+    if (isNaN(startLocal.getTime()) || isNaN(endLocal.getTime())) {
+      alert("Invalid date or time values.");
+      return;
+    }
+
+    const data = new FormData();
+    data.set("title", title);
+    data.set("room", "Online Meet");
+    data.set("startTime", startLocal.toISOString());
+    data.set("endTime", endLocal.toISOString());
+
+    try {
+      const res = await createBooking(null, data);
+      if (res.success && res.bookingId) {
+        const portalUrl = `${window.location.origin}/meet/${res.bookingId}`;
+        setMeetUrl(portalUrl);
+        try {
+          await navigator.clipboard.writeText(portalUrl);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 2000);
+        } catch (clipErr) {
+          console.error("Failed to copy automatically:", clipErr);
+        }
+        await loadBookingsForDate(selectedDate);
+      } else {
+        alert(res.message || "Failed to schedule online meeting.");
+      }
+    } catch (err) {
+      console.error("Failed to schedule online meeting:", err);
+      alert("Failed to schedule online meeting due to an unexpected error.");
+    }
+  };
+
+  useEffect(() => {
+    if (!openBookingModal) {
+      setMeetUrl(null);
+      setCopied(false);
+    }
+  }, [openBookingModal]);
+
+  useEffect(() => {
+    // Reset meetUrl when error message is cleared
+    if (!bookingState?.message) {
+      setMeetUrl(null);
+      setCopied(false);
+    }
+  }, [bookingState]);
 
   useEffect(() => {
     if (!open) {
@@ -312,9 +384,13 @@ export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
     } else if (b.room === "Room 2") {
       themeClasses =
         "from-emerald-500/90 to-teal-600/90 text-white border-emerald-600/20 hover:from-emerald-600 hover:to-teal-700 shadow-md shadow-emerald-500/10";
-    } else {
+    } else if (b.room === "Room 3") {
       themeClasses =
         "from-purple-500/90 to-fuchsia-600/90 text-white border-purple-600/20 hover:from-purple-600 hover:to-fuchsia-700 shadow-md shadow-purple-500/10";
+    } else {
+      // Online Meet
+      themeClasses =
+        "from-indigo-500/90 to-violet-600/90 text-white border-indigo-600/20 hover:from-indigo-650 hover:to-violet-750 shadow-md shadow-indigo-500/10";
     }
 
     const startStr = bStart.toLocaleTimeString([], {
@@ -393,9 +469,35 @@ export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
           >
             {startStr} - {endStr}
           </span>
-          <span className="opacity-75 hidden md:inline truncate">
-            {b.bookedBy.split("@")[0]}
-          </span>
+          {b.room === "Online Meet" && b.status === "active" ? (
+            <a
+              href={`/meet/${b.id}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="inline-flex items-center gap-1 bg-white/20 hover:bg-white/40 text-[9px] font-bold px-1.5 py-0.5 rounded transition-all flex-shrink-0"
+              title="Join Online Meeting"
+            >
+              <svg
+                width="8"
+                height="8"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="3.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M23 7l-7 5 7 5V7z" />
+                <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+              </svg>
+              Join
+            </a>
+          ) : (
+            <span className="opacity-75 hidden md:inline truncate">
+              {b.bookedBy.split("@")[0]}
+            </span>
+          )}
         </div>
       </div>
     );
@@ -544,7 +646,7 @@ export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
               </div>
 
               {/* Room cells */}
-              {["Room 1", "Room 2", "Room 3"].map((room) => {
+              {["Room 1", "Room 2", "Room 3", "Online Meet"].map((room) => {
                 let roomDesc = "";
                 let roomTheme = "";
                 if (room === "Room 1") {
@@ -554,9 +656,12 @@ export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
                   roomDesc = "12 Seats · Board";
                   roomTheme =
                     "bg-emerald-50 border-emerald-100 text-emerald-700";
-                } else {
+                } else if (room === "Room 3") {
                   roomDesc = "16 Seats · Projector";
                   roomTheme = "bg-purple-50 border-purple-100 text-purple-700";
+                } else {
+                  roomDesc = "Virtual · Video Portal";
+                  roomTheme = "bg-indigo-50 border-indigo-100 text-indigo-700";
                 }
                 return (
                   <div
@@ -599,7 +704,7 @@ export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
                 </div>
 
                 {/* Room schedules rows */}
-                {["Room 1", "Room 2", "Room 3"].map((room) => {
+                {["Room 1", "Room 2", "Room 3", "Online Meet"].map((room) => {
                   const roomBookings = bookingsList.filter(
                     (b) => b.room === room,
                   );
@@ -767,11 +872,110 @@ export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
 
             {/* Modal Body error summary */}
             {bookingState?.message && (
-              <div
-                role="alert"
-                className="mb-4 rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-xs font-medium text-red-700"
-              >
-                {bookingState.message}
+              <div className="mb-4 flex flex-col gap-3">
+                <div
+                  role="alert"
+                  className="rounded-xl bg-red-50 border border-red-200/60 px-4 py-3.5 text-xs font-medium text-red-700 leading-relaxed shadow-sm"
+                >
+                  {bookingState.message}
+                </div>
+                {bookingState.message.includes("Conflict!") && (
+                  <div className="flex flex-col gap-2.5 rounded-xl bg-gray-50/50 border border-gray-200/80 p-4 transition-all duration-300">
+                    {!meetUrl ? (
+                      <button
+                        type="button"
+                        onClick={handleScheduleOnlineMeeting}
+                        className="w-full py-2.5 px-4 text-center rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-sm hover:shadow-md transition-all duration-200 cursor-pointer flex items-center justify-center gap-2"
+                      >
+                        <svg
+                          width="14"
+                          height="14"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2.5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          className="animate-pulse"
+                        >
+                          <path d="M23 7l-7 5 7 5V7z" />
+                          <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+                        </svg>
+                        Schedule an online meeting
+                      </button>
+                    ) : (
+                      <div className="flex flex-col gap-2 animate-in fade-in slide-in-from-top-2 duration-300">
+                        <div className="text-[10px] font-bold text-gray-400 uppercase tracking-widest flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping"></span>
+                          Online Meeting Link
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            readOnly
+                            value={meetUrl}
+                            className="flex-1 px-3 py-2 rounded-lg border border-gray-200 bg-white text-xs font-mono text-gray-700 focus:outline-none select-all"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              navigator.clipboard.writeText(meetUrl);
+                              setCopied(true);
+                              setTimeout(() => setCopied(false), 2000);
+                            }}
+                            className={`h-8 px-3 rounded-lg text-xs font-semibold transition-all duration-200 flex items-center gap-1.5 cursor-pointer border ${
+                              copied
+                                ? "bg-emerald-500 border-emerald-500 text-white shadow-sm"
+                                : "bg-white hover:bg-gray-50 border-gray-200 text-gray-700 hover:text-gray-900"
+                            }`}
+                          >
+                            {copied ? (
+                              <>
+                                <svg
+                                  width="12"
+                                  height="12"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="3"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                >
+                                  <polyline points="20 6 9 17 4 12" />
+                                </svg>
+                                Copied!
+                              </>
+                            ) : (
+                              <>
+                                <svg
+                                  width="12"
+                                  height="12"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2.5"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                >
+                                  <rect
+                                    x="9"
+                                    y="9"
+                                    width="13"
+                                    height="13"
+                                    rx="2"
+                                    ry="2"
+                                  />
+                                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                                </svg>
+                                Copy
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 

@@ -16,6 +16,7 @@ export interface CreateBookingState {
   };
   message?: string;
   success?: boolean;
+  bookingId?: number;
 }
 
 export interface BookingResponse {
@@ -75,7 +76,7 @@ export async function createBooking(
   if (!title) {
     errors.title = "Meeting title is required.";
   }
-  if (!room || !["Room 1", "Room 2", "Room 3"].includes(room)) {
+  if (!room || !["Room 1", "Room 2", "Room 3", "Online Meet"].includes(room)) {
     errors.room = "Please select a valid room.";
   }
   if (!startTimeISO) {
@@ -114,25 +115,27 @@ export async function createBooking(
   }
 
   // Check for conflicts: existing startTime < new.end AND existing endTime > new.start AND status = 'active'
-  let conflicts;
-  try {
-    conflicts = await db
-      .select()
-      .from(bookings)
-      .where(
-        and(
-          eq(bookings.room, room),
-          eq(bookings.status, "active"),
-          lt(bookings.startTime, end),
-          gt(bookings.endTime, start)
+  let conflicts: (typeof bookings.$inferSelect)[] = [];
+  if (room !== "Online Meet") {
+    try {
+      conflicts = await db
+        .select()
+        .from(bookings)
+        .where(
+          and(
+            eq(bookings.room, room),
+            eq(bookings.status, "active"),
+            lt(bookings.startTime, end),
+            gt(bookings.endTime, start)
+          )
         )
-      )
-      .limit(1);
-  } catch (error) {
-    console.error("Database conflict check error:", error);
-    return {
-      message: "Failed to verify room availability due to database error. Please try again.",
-    };
+        .limit(1);
+    } catch (error) {
+      console.error("Database conflict check error:", error);
+      return {
+        message: "Failed to verify room availability due to database error. Please try again.",
+      };
+    }
   }
 
   if (conflicts.length > 0) {
@@ -145,15 +148,17 @@ export async function createBooking(
   }
 
   // Insert new booking
+  let newBooking;
   try {
-    await db.insert(bookings).values({
+    const result = await db.insert(bookings).values({
       room,
       title,
       startTime: start,
       endTime: end,
       bookedBy: email,
       status: "active",
-    });
+    }).returning({ id: bookings.id });
+    newBooking = result[0];
   } catch (error) {
     console.error("Database insert error:", error);
     return {
@@ -162,7 +167,7 @@ export async function createBooking(
   }
 
   revalidatePath("/home");
-  return { success: true };
+  return { success: true, bookingId: newBooking?.id };
 }
 
 /** Cancel a booking by setting its status to 'cancelled' (only allowed for the creator) */
