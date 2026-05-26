@@ -100,3 +100,15 @@ export async function checkAdminStatus(email: string): Promise<boolean> {
   return rows.length > 0 ? rows[0].isAdmin : false;
 }
 
+/** Get user's username by email */
+export async function getUsername(email: string): Promise<string | null> {
+  const rows = await db
+    .select({ username: users.username })
+    .from(users)
+    .where(eq(users.email, email))
+    .limit(1);
+
+  return rows.length > 0 ? rows[0].username : null;
+}
+
+

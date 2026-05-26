@@ -20,6 +20,8 @@ export const bookings = pgTable("bookings", {
   endTime: timestamp("end_time").notNull(),
   bookedBy: text("booked_by").notNull(), // email of the booking user
   status: text("status").default("active").notNull(), // "active" or "cancelled"
+  slug: text("slug").unique(),
+  password: text("password"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

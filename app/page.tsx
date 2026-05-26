@@ -44,7 +44,7 @@ export default function LoginPage() {
     "field w-full px-3 py-2.5 rounded-lg border border-gray-300 bg-white text-sm text-gray-900 placeholder:text-gray-400 transition-colors duration-150";
 
   return (
-    <main className="min-h-screen flex items-center justify-center px-4">
+    <main className="min-h-screen bg-white flex items-center justify-center px-4">
       <div className="w-full max-w-sm">
         <Image
           src="/Delhi_Metro_full_logo.svg"

@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { getProfileStatus, checkAdminStatus } from "@/app/actions/profile";
+import { getProfileStatus, checkAdminStatus, getUsername } from "@/app/actions/profile";
 import HomeClient from "./HomeClient";
 
 export const metadata: Metadata = {
@@ -20,6 +20,14 @@ export default async function HomePage() {
 
   const isFirstLogin = await getProfileStatus(email);
   const isAdmin = await checkAdminStatus(email);
+  const username = await getUsername(email);
 
-  return <HomeClient isFirstLogin={isFirstLogin} email={email} isAdmin={isAdmin} />;
+  return (
+    <HomeClient
+      isFirstLogin={isFirstLogin}
+      email={email}
+      username={username}
+      isAdmin={isAdmin}
+    />
+  );
 }

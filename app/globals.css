@@ -16,3 +16,27 @@ body {
   border-color: #2563eb;
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
 }
+
+/* Hide LiveKit expand/focus camera tile button */
+.lk-focus-toggle-button {
+  display: none !important;
+}
+
+@keyframes floatUp {
+  0% {
+    transform: translateY(0) scale(0.6);
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+    transform: translateY(-30px) scale(1.2);
+  }
+  100% {
+    transform: translateY(-250px) scale(0.8);
+    opacity: 0;
+  }
+}
+
+.animate-float-up {
+  animation: floatUp 2s cubic-bezier(0.25, 1, 0.5, 1) forwards;
+}

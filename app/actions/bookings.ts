@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { db } from "@/db";
 import { bookings, users } from "@/db/schema";
 import { and, eq, lt, gt } from "drizzle-orm";
+import { generateUniqueSlug } from "@/lib/slug";
 
 export interface CreateBookingState {
   errors?: {
@@ -17,6 +18,8 @@ export interface CreateBookingState {
   message?: string;
   success?: boolean;
   bookingId?: number;
+  bookingSlug?: string;
+  bookingPassword?: string | null;
 }
 
 export interface BookingResponse {
@@ -26,7 +29,10 @@ export interface BookingResponse {
   startTime: string; // ISO string
   endTime: string; // ISO string
   bookedBy: string;
+  bookedByUsername: string;
   status: string; // "active" or "cancelled"
+  slug: string | null;
+  password?: string | null;
 }
 
 /** Fetch bookings that overlap with the absolute start and end ISO timestamps */
@@ -35,8 +41,20 @@ export async function getBookings(startISO: string, endISO: string): Promise<Boo
   const endLimit = new Date(endISO);
 
   const rows = await db
-    .select()
+    .select({
+      id: bookings.id,
+      room: bookings.room,
+      title: bookings.title,
+      startTime: bookings.startTime,
+      endTime: bookings.endTime,
+      bookedBy: bookings.bookedBy,
+      status: bookings.status,
+      slug: bookings.slug,
+      password: bookings.password,
+      username: users.username,
+    })
     .from(bookings)
+    .leftJoin(users, eq(bookings.bookedBy, users.email))
     .where(
       and(
         lt(bookings.startTime, endLimit),
@@ -52,7 +70,10 @@ export async function getBookings(startISO: string, endISO: string): Promise<Boo
     startTime: r.startTime.toISOString(),
     endTime: r.endTime.toISOString(),
     bookedBy: r.bookedBy,
+    bookedByUsername: r.username || r.bookedBy.split("@")[0],
     status: r.status,
+    slug: r.slug,
+    password: r.password,
   }));
 }
 
@@ -71,6 +92,7 @@ export async function createBooking(
   const room = (formData.get("room") as string | null) ?? "";
   const startTimeISO = (formData.get("startTime") as string | null) ?? "";
   const endTimeISO = (formData.get("endTime") as string | null) ?? "";
+  const password = (formData.get("password") as string | null)?.trim() || null;
 
   const errors: CreateBookingState["errors"] = {};
   if (!title) {
@@ -115,12 +137,16 @@ export async function createBooking(
   }
 
   // Check for conflicts: existing startTime < new.end AND existing endTime > new.start AND status = 'active'
-  let conflicts: (typeof bookings.$inferSelect)[] = [];
+  let conflicts: { booking: typeof bookings.$inferSelect; username: string | null }[] = [];
   if (room !== "Online Meet") {
     try {
-      conflicts = await db
-        .select()
+      const rows = await db
+        .select({
+          booking: bookings,
+          username: users.username,
+        })
         .from(bookings)
+        .leftJoin(users, eq(bookings.bookedBy, users.email))
         .where(
           and(
             eq(bookings.room, room),
@@ -130,6 +156,7 @@ export async function createBooking(
           )
         )
         .limit(1);
+      conflicts = rows;
     } catch (error) {
       console.error("Database conflict check error:", error);
       return {
@@ -139,17 +166,19 @@ export async function createBooking(
   }
 
   if (conflicts.length > 0) {
-    const conflict = conflicts[0];
+    const conflict = conflicts[0].booking;
+    const conflictHost = conflicts[0].username || conflict.bookedBy;
     const cStart = new Date(conflict.startTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     const cEnd = new Date(conflict.endTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     return {
-      message: `Conflict! ${room} is already booked from ${cStart} to ${cEnd} for "${conflict.title}" (booked by ${conflict.bookedBy}).`,
+      message: `Conflict! ${room} is already booked from ${cStart} to ${cEnd} for "${conflict.title}" (booked by ${conflictHost}).`,
     };
   }
 
   // Insert new booking
   let newBooking;
   try {
+    const slug = await generateUniqueSlug();
     const result = await db.insert(bookings).values({
       room,
       title,
@@ -157,7 +186,9 @@ export async function createBooking(
       endTime: end,
       bookedBy: email,
       status: "active",
-    }).returning({ id: bookings.id });
+      slug,
+      password: room === "Online Meet" ? password : null,
+    }).returning({ id: bookings.id, slug: bookings.slug, password: bookings.password });
     newBooking = result[0];
   } catch (error) {
     console.error("Database insert error:", error);
@@ -167,7 +198,12 @@ export async function createBooking(
   }
 
   revalidatePath("/home");
-  return { success: true, bookingId: newBooking?.id };
+  return {
+    success: true,
+    bookingId: newBooking?.id,
+    bookingSlug: newBooking?.slug ?? undefined,
+    bookingPassword: newBooking?.password ?? undefined,
+  };
 }
 
 /** Cancel a booking by setting its status to 'cancelled' (only allowed for the creator) */

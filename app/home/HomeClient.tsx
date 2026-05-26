@@ -15,10 +15,11 @@ import {
 interface Props {
   isFirstLogin: boolean;
   email: string;
+  username: string | null;
   isAdmin: boolean;
 }
 
-export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
+export default function HomeClient({ isFirstLogin, email, username, isAdmin }: Props) {
   // First-login modal states
   const open = isFirstLogin;
   const [showPass, setShowPass] = useState(false);
@@ -78,7 +79,10 @@ export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
       errors.title = "Meeting title is required.";
     }
 
-    if (!room || !["Room 1", "Room 2", "Room 3", "Online Meet"].includes(room)) {
+    if (
+      !room ||
+      !["Room 1", "Room 2", "Room 3", "Online Meet"].includes(room)
+    ) {
       errors.room = "Please select a valid room.";
     }
 
@@ -178,12 +182,26 @@ export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
     data.set("room", room);
     data.set("startTime", startLocal.toISOString());
     data.set("endTime", endLocal.toISOString());
+    if (room === "Online Meet" && formData.get("password")) {
+      data.set("password", formData.get("password") as string);
+    }
 
     try {
       const res = await createBooking(prevState, data);
       if (res.success) {
         await loadBookingsForDate(selectedDate);
-        setOpenBookingModal(false);
+        if (room === "Online Meet") {
+          const portalUrl = `${window.location.origin}/meet/${res.bookingSlug || res.bookingId}`;
+          setSuccessMeetInfo({
+            title,
+            startTime: formatTime12Hour(startVal),
+            endTime: formatTime12Hour(endVal),
+            url: portalUrl,
+            password: res.bookingPassword || null,
+          });
+        } else {
+          setOpenBookingModal(false);
+        }
         return null; // Clear state on success
       }
       return res;
@@ -196,13 +214,60 @@ export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
   // Online meeting states
   const [meetUrl, setMeetUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [shared, setShared] = useState(false);
+  const [lockMeeting, setLockMeeting] = useState(false);
+  const [generatedPassword, setGeneratedPassword] = useState("");
+  const [successMeetInfo, setSuccessMeetInfo] = useState<{
+    title: string;
+    startTime: string;
+    endTime: string;
+    url: string;
+    password?: string | null;
+  } | null>(null);
+
+  const formatTime12Hour = (time24: string) => {
+    const parts = time24.split(":");
+    if (parts.length < 2) return time24;
+    const h = parseInt(parts[0], 10);
+    const m = parseInt(parts[1], 10);
+    if (isNaN(h) || isNaN(m)) return time24;
+    const ampm = h >= 12 ? "PM" : "AM";
+    const h12 = h % 12 || 12;
+    const mPad = String(m).padStart(2, "0");
+    return `${h12}:${mPad} ${ampm}`;
+  };
+
+  const generateRandomPassword = () => {
+    const bytes = new Uint8Array(16);
+    window.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  };
+
+  const handleLockMeetingChange = (checked: boolean) => {
+    setLockMeeting(checked);
+    if (checked && !generatedPassword) {
+      setGeneratedPassword(generateRandomPassword());
+    }
+  };
+
+  const regeneratePassword = () => {
+    setGeneratedPassword(generateRandomPassword());
+  };
 
   // Handle scheduling virtual online meeting
   const handleScheduleOnlineMeeting = async () => {
-    const titleEl = document.getElementById("booking-title-input") as HTMLInputElement | null;
-    const dateEl = document.getElementById("booking-date") as HTMLInputElement | null;
-    const startEl = document.getElementById("booking-start") as HTMLInputElement | null;
-    const endEl = document.getElementById("booking-end") as HTMLInputElement | null;
+    const titleEl = document.getElementById(
+      "booking-title-input",
+    ) as HTMLInputElement | null;
+    const dateEl = document.getElementById(
+      "booking-date",
+    ) as HTMLInputElement | null;
+    const startEl = document.getElementById(
+      "booking-start",
+    ) as HTMLInputElement | null;
+    const endEl = document.getElementById(
+      "booking-end",
+    ) as HTMLInputElement | null;
 
     const title = titleEl?.value?.trim() || "Online Meeting";
     const dateVal = dateEl?.value || "";
@@ -210,7 +275,9 @@ export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
     const endVal = endEl?.value || "";
 
     if (!dateVal || !startVal || !endVal) {
-      alert("Please ensure title, date, start time, and end time are filled out.");
+      alert(
+        "Please ensure title, date, start time, and end time are filled out.",
+      );
       return;
     }
 
@@ -230,16 +297,16 @@ export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
 
     try {
       const res = await createBooking(null, data);
-      if (res.success && res.bookingId) {
-        const portalUrl = `${window.location.origin}/meet/${res.bookingId}`;
+      if (res.success && (res.bookingSlug || res.bookingId)) {
+        const portalUrl = `${window.location.origin}/meet/${res.bookingSlug || res.bookingId}`;
         setMeetUrl(portalUrl);
-        try {
-          await navigator.clipboard.writeText(portalUrl);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 2000);
-        } catch (clipErr) {
-          console.error("Failed to copy automatically:", clipErr);
-        }
+        setSuccessMeetInfo({
+          title,
+          startTime: formatTime12Hour(startVal),
+          endTime: formatTime12Hour(endVal),
+          url: portalUrl,
+          password: res.bookingPassword || null,
+        });
         await loadBookingsForDate(selectedDate);
       } else {
         alert(res.message || "Failed to schedule online meeting.");
@@ -254,6 +321,10 @@ export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
     if (!openBookingModal) {
       setMeetUrl(null);
       setCopied(false);
+      setShared(false);
+      setLockMeeting(false);
+      setGeneratedPassword("");
+      setSuccessMeetInfo(null);
     }
   }, [openBookingModal]);
 
@@ -262,6 +333,8 @@ export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
     if (!bookingState?.message) {
       setMeetUrl(null);
       setCopied(false);
+      setShared(false);
+      setSuccessMeetInfo(null);
     }
   }, [bookingState]);
 
@@ -417,7 +490,7 @@ export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
           top: `calc(${topPercent}% + 4px)`,
           height: `calc(${heightPercent}% - 8px)`,
         }}
-        title={`${b.title}\nTime: ${startStr} - ${endStr}\nBooked by: ${b.bookedBy}${b.status === "cancelled" ? " (Cancelled)" : ""}`}
+        title={`${b.title}\nTime: ${startStr} - ${endStr}\nBooked by: ${b.bookedByUsername}${b.status === "cancelled" ? " (Cancelled)" : ""}`}
       >
         <div className="flex items-start justify-between gap-1 w-full">
           <div
@@ -471,7 +544,7 @@ export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
           </span>
           {b.room === "Online Meet" && b.status === "active" ? (
             <a
-              href={`/meet/${b.id}`}
+              href={`/meet/${b.slug || b.id}`}
               target="_blank"
               rel="noopener noreferrer"
               onClick={(e) => e.stopPropagation()}
@@ -495,7 +568,7 @@ export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
             </a>
           ) : (
             <span className="opacity-75 hidden md:inline truncate">
-              {b.bookedBy.split("@")[0]}
+              {b.bookedByUsername}
             </span>
           )}
         </div>
@@ -522,7 +595,7 @@ export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
         <div className="flex items-center gap-4">
           <div className="hidden sm:flex flex-col text-right">
             <span className="text-xs text-gray-400">Signed in as</span>
-            <span className="text-xs font-semibold text-gray-700">{email}</span>
+            <span className="text-xs font-semibold text-gray-700">{username || email}</span>
           </div>
           <button
             onClick={() => startLogoutTransition(() => logoutAction())}
@@ -535,7 +608,7 @@ export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
       </header>
 
       {/* Main dashboard space */}
-      <main className="min-h-screen pt-24 pb-16 px-4 bg-gray-50/50">
+      <main className="min-h-screen pt-24 pb-16 px-4 bg-white">
         <div className="max-w-6xl mx-auto flex flex-col gap-6">
           {/* Controls toolbar */}
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-4 rounded-2xl border border-gray-200/60 shadow-sm">
@@ -840,7 +913,7 @@ export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
           aria-modal="true"
           aria-labelledby="booking-title"
         >
-          <div className="w-full max-w-md bg-white rounded-2xl border border-gray-200/80 shadow-xl px-8 py-7 animate-in fade-in zoom-in-95 duration-200">
+          <div className="w-full max-w-xl bg-white rounded-2xl border border-gray-200/80 shadow-xl px-8 py-7 animate-in fade-in zoom-in-95 duration-200">
             {/* Modal Header */}
             <div className="flex items-center justify-between mb-5">
               <h2
@@ -870,346 +943,521 @@ export default function HomeClient({ isFirstLogin, email, isAdmin }: Props) {
               </button>
             </div>
 
-            {/* Modal Body error summary */}
-            {bookingState?.message && (
-              <div className="mb-4 flex flex-col gap-3">
-                <div
-                  role="alert"
-                  className="rounded-xl bg-red-50 border border-red-200/60 px-4 py-3.5 text-xs font-medium text-red-700 leading-relaxed shadow-sm"
-                >
-                  {bookingState.message}
+            {successMeetInfo ? (
+              <div className="flex flex-col gap-5 py-2 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                <div className="flex flex-col items-center text-center gap-2">
+                  <div className="w-12 h-12 bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 rounded-full flex items-center justify-center">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  </div>
+                  <h3 className="text-lg font-bold text-gray-950">Online Meeting Scheduled</h3>
+                  <p className="text-xs text-gray-400 font-medium">Your virtual room is ready for participants.</p>
                 </div>
-                {bookingState.message.includes("Conflict!") && (
-                  <div className="flex flex-col gap-2.5 rounded-xl bg-gray-50/50 border border-gray-200/80 p-4 transition-all duration-300">
-                    {!meetUrl ? (
-                      <button
-                        type="button"
-                        onClick={handleScheduleOnlineMeeting}
-                        className="w-full py-2.5 px-4 text-center rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-sm hover:shadow-md transition-all duration-200 cursor-pointer flex items-center justify-center gap-2"
-                      >
-                        <svg
-                          width="14"
-                          height="14"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2.5"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          className="animate-pulse"
-                        >
-                          <path d="M23 7l-7 5 7 5V7z" />
-                          <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+
+                <div className="flex flex-col gap-3.5 bg-gray-50 border border-gray-150 rounded-2xl p-4 text-xs text-gray-700">
+                  <div className="flex justify-between">
+                    <span className="text-gray-400 font-semibold uppercase tracking-wider text-[10px]">Title</span>
+                    <span className="font-bold text-gray-900 truncate max-w-[200px]">{successMeetInfo.title}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-400 font-semibold uppercase tracking-wider text-[10px]">Time</span>
+                    <span className="font-bold text-gray-900">{successMeetInfo.startTime} - {successMeetInfo.endTime}</span>
+                  </div>
+                  {successMeetInfo.password && (
+                    <div className="flex justify-between">
+                      <span className="text-gray-400 font-semibold uppercase tracking-wider text-[10px]">Password</span>
+                      <span className="font-bold text-gray-900 font-mono select-all bg-white px-2 py-0.5 border border-gray-150 rounded-md">{successMeetInfo.password}</span>
+                    </div>
+                  )}
+                  <div className="flex flex-col gap-1.5 pt-2 border-t border-gray-200">
+                    <span className="text-gray-400 font-semibold uppercase tracking-wider text-[10px]">Meeting URL</span>
+                    <input
+                      type="text"
+                      readOnly
+                      value={successMeetInfo.url}
+                      className="w-full px-3 py-2 rounded-lg border border-gray-200 bg-white text-xs font-mono text-gray-750 focus:outline-none select-all"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(successMeetInfo.url);
+                      setCopied(true);
+                      setTimeout(() => setCopied(false), 2000);
+                    }}
+                    className={`flex-grow py-2.5 rounded-xl text-xs font-bold transition-all duration-200 flex items-center justify-center gap-1.5 cursor-pointer border ${
+                      copied
+                        ? "bg-emerald-500 border-emerald-500 text-white shadow-sm"
+                        : "bg-white hover:bg-gray-50 border-gray-200 text-gray-700"
+                    }`}
+                  >
+                    {copied ? (
+                      <>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                          <polyline points="20 6 9 17 4 12" />
                         </svg>
-                        Schedule an online meeting
-                      </button>
+                        Copied Link!
+                      </>
                     ) : (
-                      <div className="flex flex-col gap-2 animate-in fade-in slide-in-from-top-2 duration-300">
-                        <div className="text-[10px] font-bold text-gray-400 uppercase tracking-widest flex items-center gap-1.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping"></span>
-                          Online Meeting Link
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="text"
-                            readOnly
-                            value={meetUrl}
-                            className="flex-1 px-3 py-2 rounded-lg border border-gray-200 bg-white text-xs font-mono text-gray-700 focus:outline-none select-all"
-                          />
+                      <>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                        </svg>
+                        Copy Link
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const shareText = [
+                        "Hey everyone! Kindly join this meeting",
+                        `Title: ${successMeetInfo.title}`,
+                        `Time: ${successMeetInfo.startTime} - ${successMeetInfo.endTime}`,
+                        `Link: ${successMeetInfo.url}`,
+                        successMeetInfo.password ? `Password: ${successMeetInfo.password}` : ""
+                      ].filter(Boolean).join("\n");
+                      navigator.clipboard.writeText(shareText);
+                      setShared(true);
+                      setTimeout(() => setShared(false), 2000);
+                    }}
+                    className={`flex-grow py-2.5 rounded-xl text-xs font-bold transition-all duration-200 flex items-center justify-center gap-1.5 cursor-pointer border ${
+                      shared
+                        ? "bg-indigo-650 border-indigo-650 text-white shadow-sm"
+                        : "bg-indigo-600 hover:bg-indigo-750 border-indigo-600 text-white shadow-sm shadow-indigo-500/10"
+                    }`}
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                      <circle cx="18" cy="5" r="3" />
+                      <circle cx="6" cy="12" r="3" />
+                      <circle cx="18" cy="19" r="3" />
+                      <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+                      <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+                    </svg>
+                    {shared ? "Shared Details!" : "Share"}
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setOpenBookingModal(false)}
+                  className="w-full py-2.5 bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold rounded-xl transition-colors cursor-pointer mt-1"
+                >
+                  Done
+                </button>
+              </div>
+            ) : (
+              <>
+                {/* Modal Body error summary */}
+                {bookingState?.message && (
+                  <div className="mb-4 flex flex-col gap-3">
+                    <div
+                      role="alert"
+                      className="rounded-xl bg-red-50 border border-red-200/60 px-4 py-3.5 text-xs font-medium text-red-700 leading-relaxed shadow-sm"
+                    >
+                      {bookingState.message}
+                    </div>
+                    {bookingState.message.includes("Conflict!") && (
+                      <div className="flex flex-col gap-2.5 rounded-xl bg-gray-50/50 border border-gray-200/80 p-4 transition-all duration-300">
+                        {!meetUrl ? (
                           <button
                             type="button"
-                            onClick={() => {
-                              navigator.clipboard.writeText(meetUrl);
-                              setCopied(true);
-                              setTimeout(() => setCopied(false), 2000);
-                            }}
-                            className={`h-8 px-3 rounded-lg text-xs font-semibold transition-all duration-200 flex items-center gap-1.5 cursor-pointer border ${
-                              copied
-                                ? "bg-emerald-500 border-emerald-500 text-white shadow-sm"
-                                : "bg-white hover:bg-gray-50 border-gray-200 text-gray-700 hover:text-gray-900"
-                            }`}
+                            onClick={handleScheduleOnlineMeeting}
+                            className="w-full py-2.5 px-4 text-center rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-sm hover:shadow-md transition-all duration-200 cursor-pointer flex items-center justify-center gap-2"
                           >
-                            {copied ? (
-                              <>
-                                <svg
-                                  width="12"
-                                  height="12"
-                                  viewBox="0 0 24 24"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth="3"
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                >
-                                  <polyline points="20 6 9 17 4 12" />
-                                </svg>
-                                Copied!
-                              </>
-                            ) : (
-                              <>
-                                <svg
-                                  width="12"
-                                  height="12"
-                                  viewBox="0 0 24 24"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth="2.5"
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                >
-                                  <rect
-                                    x="9"
-                                    y="9"
-                                    width="13"
-                                    height="13"
-                                    rx="2"
-                                    ry="2"
-                                  />
-                                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                                </svg>
-                                Copy
-                              </>
-                            )}
+                            <svg
+                              width="14"
+                              height="14"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2.5"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              className="animate-pulse"
+                            >
+                              <path d="M23 7l-7 5 7 5V7z" />
+                              <rect
+                                x="1"
+                                y="5"
+                                width="15"
+                                height="14"
+                                rx="2"
+                                ry="2"
+                              />
+                            </svg>
+                            Schedule an online meeting
                           </button>
-                        </div>
+                        ) : (
+                          <div className="flex flex-col gap-2 animate-in fade-in slide-in-from-top-2 duration-300">
+                            <div className="text-[10px] font-bold text-gray-400 uppercase tracking-widest flex items-center gap-1.5">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping"></span>
+                              Online Meeting Link
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="text"
+                                readOnly
+                                value={meetUrl}
+                                className="flex-1 px-3 py-2 rounded-lg border border-gray-200 bg-white text-xs font-mono text-gray-700 focus:outline-none select-all"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  navigator.clipboard.writeText(meetUrl);
+                                  setCopied(true);
+                                  setTimeout(() => setCopied(false), 2000);
+                                }}
+                                className={`h-8 px-3 rounded-lg text-xs font-semibold transition-all duration-200 flex items-center gap-1.5 cursor-pointer border ${
+                                  copied
+                                    ? "bg-emerald-500 border-emerald-500 text-white shadow-sm"
+                                    : "bg-white hover:bg-gray-50 border-gray-200 text-gray-700 hover:text-gray-900"
+                                }`}
+                              >
+                                {copied ? (
+                                  <>
+                                    <svg
+                                      width="12"
+                                      height="12"
+                                      viewBox="0 0 24 24"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      strokeWidth="3"
+                                      strokeLinecap="round"
+                                      strokeLinejoin="round"
+                                    >
+                                      <polyline points="20 6 9 17 4 12" />
+                                    </svg>
+                                    Copied!
+                                  </>
+                                ) : (
+                                  <>
+                                    <svg
+                                      width="12"
+                                      height="12"
+                                      viewBox="0 0 24 24"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      strokeWidth="2.5"
+                                      strokeLinecap="round"
+                                      strokeLinejoin="round"
+                                    >
+                                      <rect
+                                        x="9"
+                                        y="9"
+                                        width="13"
+                                        height="13"
+                                        rx="2"
+                                        ry="2"
+                                      />
+                                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                                    </svg>
+                                    Copy
+                                  </>
+                                )}
+                              </button>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
                 )}
-              </div>
+
+                {/* Booking Form */}
+                <form
+                  className="flex flex-col gap-4"
+                  action={bookingFormAction}
+                  noValidate
+                >
+                  <input type="hidden" name="room" value={selectedRoom} />
+
+                  {/* Meeting Title */}
+                  <div className="flex flex-col gap-1">
+                    <label
+                      htmlFor="booking-title-input"
+                      className="text-xs font-semibold text-gray-500 uppercase tracking-wider"
+                    >
+                      Meeting Title
+                    </label>
+                    <input
+                      id="booking-title-input"
+                      name="title"
+                      type="text"
+                      className={inputBase}
+                      autoFocus
+                      aria-invalid={!!bookingState?.errors?.title}
+                      aria-describedby={
+                        bookingState?.errors?.title ? "title-err" : undefined
+                      }
+                    />
+                    {bookingState?.errors?.title && (
+                      <p
+                        id="title-err"
+                        role="alert"
+                        className="text-xs text-red-600 mt-0.5"
+                      >
+                        {bookingState.errors.title}
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Room Card Selection */}
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                      Select Room
+                    </label>
+                    <div className="grid grid-cols-4 gap-2">
+                      {[
+                        {
+                          id: "Room 1",
+                          capacity: "8 Seats",
+                          color:
+                            "border-blue-200 hover:border-blue-500 active:bg-blue-50/50",
+                          selectedBg:
+                            "bg-blue-50/80 border-blue-500 ring-2 ring-blue-500/10 text-blue-900",
+                        },
+                        {
+                          id: "Room 2",
+                          capacity: "12 Seats",
+                          color:
+                            "border-emerald-200 hover:border-emerald-500 active:bg-emerald-50/50",
+                          selectedBg:
+                            "bg-emerald-50/80 border-emerald-500 ring-2 ring-emerald-500/10 text-emerald-900",
+                        },
+                        {
+                          id: "Room 3",
+                          capacity: "16 Seats",
+                          color:
+                            "border-purple-200 hover:border-purple-500 active:bg-purple-50/50",
+                          selectedBg:
+                            "bg-purple-50/80 border-purple-500 ring-2 ring-purple-500/10 text-purple-900",
+                        },
+                        {
+                          id: "Online Meet",
+                          capacity: "Online",
+                          color:
+                            "border-indigo-200 hover:border-indigo-500 active:bg-indigo-50/50",
+                          selectedBg:
+                            "bg-indigo-50/80 border-indigo-500 ring-2 ring-indigo-500/10 text-indigo-900",
+                        },
+                      ].map((rm) => {
+                        const isSelected = selectedRoom === rm.id;
+                        return (
+                          <button
+                            key={rm.id}
+                            type="button"
+                            onClick={() => setSelectedRoom(rm.id)}
+                            className={`border rounded-xl p-3 text-left flex flex-col justify-between cursor-pointer transition-all duration-150 ${isSelected ? rm.selectedBg : "border-gray-200 hover:border-gray-300"}`}
+                          >
+                            <span className="text-xs font-bold leading-tight truncate">{rm.id}</span>
+                            <span className="text-[10px] text-gray-400 font-medium leading-none">
+                              {rm.capacity}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {bookingState?.errors?.room && (
+                      <p role="alert" className="text-xs text-red-600 mt-0.5">
+                        {bookingState.errors.room}
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Online Meet Password Locking Options */}
+                  {selectedRoom === "Online Meet" && (
+                    <div className="flex flex-col gap-2 p-3 bg-gray-50 border border-gray-150 rounded-xl animate-in fade-in slide-in-from-top-1 duration-200">
+                      <div className="flex items-center justify-between">
+                        <label htmlFor="lock-meeting-checkbox" className="text-xs font-semibold text-gray-700 flex items-center gap-2 cursor-pointer">
+                          <input
+                            id="lock-meeting-checkbox"
+                            type="checkbox"
+                            checked={lockMeeting}
+                            onChange={(e) => handleLockMeetingChange(e.target.checked)}
+                            className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                          />
+                          Lock meeting with a password
+                        </label>
+                      </div>
+                      {lockMeeting && (
+                        <div className="flex flex-col gap-1.5 mt-1 animate-in fade-in duration-200">
+                          <div className="flex items-center gap-2">
+                            <input
+                              id="meeting-password-input"
+                              name="password"
+                              type="text"
+                              readOnly
+                              value={generatedPassword}
+                              className="flex-1 px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-xs font-mono text-gray-750 focus:outline-none select-all"
+                              placeholder="Generated password"
+                            />
+                            <button
+                              type="button"
+                              onClick={regeneratePassword}
+                              className="px-2.5 py-1.5 bg-white border border-gray-200 hover:border-gray-300 rounded-lg text-[10px] font-bold text-gray-600 hover:text-gray-900 transition-colors flex items-center gap-1 cursor-pointer"
+                              title="Generate new password"
+                            >
+                              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+                              </svg>
+                              Regen
+                            </button>
+                          </div>
+                          <p className="text-[10px] text-gray-400 font-medium">
+                            People will need this password to join the online meet.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Date Selection */}
+                  <div className="flex flex-col gap-1">
+                    <label
+                      htmlFor="booking-date"
+                      className="text-xs font-semibold text-gray-500 uppercase tracking-wider"
+                    >
+                      Date
+                    </label>
+                    <input
+                      id="booking-date"
+                      name="dateInput"
+                      type="date"
+                      defaultValue={selectedDate}
+                      className={inputBase}
+                      aria-invalid={!!bookingState?.errors?.date}
+                      aria-describedby={
+                        bookingState?.errors?.date ? "date-err" : undefined
+                      }
+                    />
+                    {bookingState?.errors?.date && (
+                      <p
+                        id="date-err"
+                        role="alert"
+                        className="text-xs text-red-600 mt-0.5"
+                      >
+                        {bookingState.errors.date}
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Time Range grid */}
+                  <div className="grid grid-cols-2 gap-4">
+                    {/* Start Time */}
+                    <div className="flex flex-col gap-1">
+                      <label
+                        htmlFor="booking-start"
+                        className="text-xs font-semibold text-gray-500 uppercase tracking-wider"
+                      >
+                        Start Time
+                      </label>
+                      <input
+                        id="booking-start"
+                        name="startTimeInput"
+                        type="time"
+                        min="08:00"
+                        max="19:59"
+                        className={inputBase}
+                        aria-invalid={!!bookingState?.errors?.startTime}
+                        aria-describedby={
+                          bookingState?.errors?.startTime ? "start-err" : undefined
+                        }
+                      />
+                      {bookingState?.errors?.startTime && (
+                        <p
+                          id="start-err"
+                          role="alert"
+                          className="text-xs text-red-600 mt-0.5"
+                        >
+                          {bookingState.errors.startTime}
+                        </p>
+                      )}
+                    </div>
+
+                    {/* End Time */}
+                    <div className="flex flex-col gap-1">
+                      <label
+                        htmlFor="booking-end"
+                        className="text-xs font-semibold text-gray-500 uppercase tracking-wider"
+                      >
+                        End Time
+                      </label>
+                      <input
+                        id="booking-end"
+                        name="endTimeInput"
+                        type="time"
+                        min="08:01"
+                        max="20:00"
+                        className={inputBase}
+                        aria-invalid={!!bookingState?.errors?.endTime}
+                        aria-describedby={
+                          bookingState?.errors?.endTime ? "end-err" : undefined
+                        }
+                      />
+                      {bookingState?.errors?.endTime && (
+                        <p
+                          id="end-err"
+                          role="alert"
+                          className="text-xs text-red-600 mt-0.5"
+                        >
+                          {bookingState.errors.endTime}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Form Actions (Buttons) */}
+                  <div className="flex items-center gap-3 mt-4">
+                    <button
+                      type="button"
+                      onClick={() => setOpenBookingModal(false)}
+                      className="flex-1 py-2.5 rounded-xl border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm font-semibold transition-colors cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isBookingPending}
+                      className="flex-grow py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white text-sm font-semibold transition-all shadow-sm shadow-blue-500/10 hover:shadow-md cursor-pointer flex items-center justify-center gap-2"
+                    >
+                      {isBookingPending ? (
+                        <>
+                          <svg
+                            className="animate-spin h-4 w-4 text-white"
+                            fill="none"
+                            viewBox="0 0 24 24"
+                          >
+                            <circle
+                              className="opacity-25"
+                              cx="12"
+                              cy="12"
+                              r="10"
+                              stroke="currentColor"
+                              strokeWidth="4"
+                            />
+                            <path
+                              className="opacity-75"
+                              fill="currentColor"
+                              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                            />
+                          </svg>
+                          Booking...
+                        </>
+                      ) : (
+                        "Confirm Booking"
+                      )}
+                    </button>
+                  </div>
+                </form>
+              </>
             )}
-
-            {/* Booking Form */}
-            <form
-              className="flex flex-col gap-4"
-              action={bookingFormAction}
-              noValidate
-            >
-              <input type="hidden" name="room" value={selectedRoom} />
-
-              {/* Meeting Title */}
-              <div className="flex flex-col gap-1">
-                <label
-                  htmlFor="booking-title-input"
-                  className="text-xs font-semibold text-gray-500 uppercase tracking-wider"
-                >
-                  Meeting Title
-                </label>
-                <input
-                  id="booking-title-input"
-                  name="title"
-                  type="text"
-                  className={inputBase}
-                  autoFocus
-                  aria-invalid={!!bookingState?.errors?.title}
-                  aria-describedby={
-                    bookingState?.errors?.title ? "title-err" : undefined
-                  }
-                />
-                {bookingState?.errors?.title && (
-                  <p
-                    id="title-err"
-                    role="alert"
-                    className="text-xs text-red-600 mt-0.5"
-                  >
-                    {bookingState.errors.title}
-                  </p>
-                )}
-              </div>
-
-              {/* Room Card Selection */}
-              <div className="flex flex-col gap-1.5">
-                <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                  Select Room
-                </label>
-                <div className="grid grid-cols-3 gap-2">
-                  {[
-                    {
-                      id: "Room 1",
-                      capacity: "8 Seats",
-                      color:
-                        "border-blue-200 hover:border-blue-500 active:bg-blue-50/50",
-                      selectedBg:
-                        "bg-blue-50/80 border-blue-500 ring-2 ring-blue-500/10 text-blue-900",
-                    },
-                    {
-                      id: "Room 2",
-                      capacity: "12 Seats",
-                      color:
-                        "border-emerald-200 hover:border-emerald-500 active:bg-emerald-50/50",
-                      selectedBg:
-                        "bg-emerald-50/80 border-emerald-500 ring-2 ring-emerald-500/10 text-emerald-900",
-                    },
-                    {
-                      id: "Room 3",
-                      capacity: "16 Seats",
-                      color:
-                        "border-purple-200 hover:border-purple-500 active:bg-purple-50/50",
-                      selectedBg:
-                        "bg-purple-50/80 border-purple-500 ring-2 ring-purple-500/10 text-purple-900",
-                    },
-                  ].map((rm) => {
-                    const isSelected = selectedRoom === rm.id;
-                    return (
-                      <button
-                        key={rm.id}
-                        type="button"
-                        onClick={() => setSelectedRoom(rm.id)}
-                        className={`border rounded-xl p-3 text-left flex flex-col justify-between cursor-pointer transition-all duration-150 ${isSelected ? rm.selectedBg : "border-gray-200 hover:border-gray-300"}`}
-                      >
-                        <span className="text-xs font-bold">{rm.id}</span>
-                        <span className="text-[10px] text-gray-400 font-medium">
-                          {rm.capacity}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-                {bookingState?.errors?.room && (
-                  <p role="alert" className="text-xs text-red-600 mt-0.5">
-                    {bookingState.errors.room}
-                  </p>
-                )}
-              </div>
-
-              {/* Date Selection */}
-              <div className="flex flex-col gap-1">
-                <label
-                  htmlFor="booking-date"
-                  className="text-xs font-semibold text-gray-500 uppercase tracking-wider"
-                >
-                  Date
-                </label>
-                <input
-                  id="booking-date"
-                  name="dateInput"
-                  type="date"
-                  defaultValue={selectedDate}
-                  className={inputBase}
-                  aria-invalid={!!bookingState?.errors?.date}
-                  aria-describedby={
-                    bookingState?.errors?.date ? "date-err" : undefined
-                  }
-                />
-                {bookingState?.errors?.date && (
-                  <p
-                    id="date-err"
-                    role="alert"
-                    className="text-xs text-red-600 mt-0.5"
-                  >
-                    {bookingState.errors.date}
-                  </p>
-                )}
-              </div>
-
-              {/* Time Range grid */}
-              <div className="grid grid-cols-2 gap-4">
-                {/* Start Time */}
-                <div className="flex flex-col gap-1">
-                  <label
-                    htmlFor="booking-start"
-                    className="text-xs font-semibold text-gray-500 uppercase tracking-wider"
-                  >
-                    Start Time
-                  </label>
-                  <input
-                    id="booking-start"
-                    name="startTimeInput"
-                    type="time"
-                    min="08:00"
-                    max="19:59"
-                    className={inputBase}
-                    aria-invalid={!!bookingState?.errors?.startTime}
-                    aria-describedby={
-                      bookingState?.errors?.startTime ? "start-err" : undefined
-                    }
-                  />
-                  {bookingState?.errors?.startTime && (
-                    <p
-                      id="start-err"
-                      role="alert"
-                      className="text-xs text-red-600 mt-0.5"
-                    >
-                      {bookingState.errors.startTime}
-                    </p>
-                  )}
-                </div>
-
-                {/* End Time */}
-                <div className="flex flex-col gap-1">
-                  <label
-                    htmlFor="booking-end"
-                    className="text-xs font-semibold text-gray-500 uppercase tracking-wider"
-                  >
-                    End Time
-                  </label>
-                  <input
-                    id="booking-end"
-                    name="endTimeInput"
-                    type="time"
-                    min="08:01"
-                    max="20:00"
-                    className={inputBase}
-                    aria-invalid={!!bookingState?.errors?.endTime}
-                    aria-describedby={
-                      bookingState?.errors?.endTime ? "end-err" : undefined
-                    }
-                  />
-                  {bookingState?.errors?.endTime && (
-                    <p
-                      id="end-err"
-                      role="alert"
-                      className="text-xs text-red-600 mt-0.5"
-                    >
-                      {bookingState.errors.endTime}
-                    </p>
-                  )}
-                </div>
-              </div>
-
-              {/* Form Actions (Buttons) */}
-              <div className="flex items-center gap-3 mt-4">
-                <button
-                  type="button"
-                  onClick={() => setOpenBookingModal(false)}
-                  className="flex-1 py-2.5 rounded-xl border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm font-semibold transition-colors cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isBookingPending}
-                  className="flex-grow py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white text-sm font-semibold transition-all shadow-sm shadow-blue-500/10 hover:shadow-md cursor-pointer flex items-center justify-center gap-2"
-                >
-                  {isBookingPending ? (
-                    <>
-                      <svg
-                        className="animate-spin h-4 w-4 text-white"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                      >
-                        <circle
-                          className="opacity-25"
-                          cx="12"
-                          cy="12"
-                          r="10"
-                          stroke="currentColor"
-                          strokeWidth="4"
-                        />
-                        <path
-                          className="opacity-75"
-                          fill="currentColor"
-                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                        />
-                      </svg>
-                      Booking...
-                    </>
-                  ) : (
-                    "Confirm Booking"
-                  )}
-                </button>
-              </div>
-            </form>
           </div>
         </div>
       )}
