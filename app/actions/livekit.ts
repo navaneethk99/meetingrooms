@@ -1,6 +1,6 @@
 "use server";
 
-import { AccessToken } from "livekit-server-sdk";
+import { AccessToken, RoomServiceClient } from "livekit-server-sdk";
 import { cookies } from "next/headers";
 import { getUsername } from "@/app/actions/profile";
 
@@ -44,5 +44,31 @@ export async function getParticipantToken(room: string): Promise<string | null> 
   } catch (error) {
     console.error("Error generating LiveKit token:", error);
     return null;
+  }
+}
+
+/** Returns true when the specified participant is already present in the room. */
+export async function isParticipantInRoom(
+  room: string,
+  participantIdentity: string,
+): Promise<boolean> {
+  const livekitUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL;
+  const apiKey = process.env.LIVEKIT_API_KEY;
+  const apiSecret = process.env.LIVEKIT_API_SECRET;
+
+  if (!livekitUrl || !apiKey || !apiSecret) {
+    return false;
+  }
+
+  try {
+    const roomService = new RoomServiceClient(livekitUrl, apiKey, apiSecret);
+    const participants = await roomService.listParticipants(room);
+
+    return participants.some(
+      (participant) => participant.identity === participantIdentity,
+    );
+  } catch (error) {
+    console.error("Error checking LiveKit room participants:", error);
+    return false;
   }
 }

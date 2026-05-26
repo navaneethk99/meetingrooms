@@ -1,7 +1,13 @@
 "use client";
 
 import Image from "next/image";
-import { useActionState, useState, useEffect, useTransition } from "react";
+import {
+  useActionState,
+  useState,
+  useEffect,
+  useTransition,
+  useRef,
+} from "react";
 import { setupProfile, type ProfileState } from "@/app/actions/profile";
 import { logoutAction } from "@/app/actions/auth";
 import {
@@ -19,12 +25,21 @@ interface Props {
   isAdmin: boolean;
 }
 
-export default function HomeClient({ isFirstLogin, email, username, isAdmin }: Props) {
+export default function HomeClient({
+  isFirstLogin,
+  email,
+  username,
+  isAdmin,
+}: Props) {
   // First-login modal states
   const open = isFirstLogin;
   const [showPass, setShowPass] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
-
+  const currentTime = new Date().toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
   const [state, formAction, isPending] = useActionState<
     ProfileState | null,
     FormData
@@ -42,7 +57,9 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
   const [loadingBookings, setLoadingBookings] = useState(false);
   const [openBookingModal, setOpenBookingModal] = useState(false);
   const [selectedRoom, setSelectedRoom] = useState("Room 1");
+  const [timelineZoom, setTimelineZoom] = useState(1);
   const [isPendingLogout, startLogoutTransition] = useTransition();
+  const timelineScrollRef = useRef<HTMLDivElement | null>(null);
 
   // Load Bookings for the selected date
   const loadBookingsForDate = async (dateStr: string) => {
@@ -185,6 +202,9 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
     if (room === "Online Meet" && formData.get("password")) {
       data.set("password", formData.get("password") as string);
     }
+    if (room === "Online Meet" && formData.get("requireSignIn") === "true") {
+      data.set("requireSignIn", "true");
+    }
 
     try {
       const res = await createBooking(prevState, data);
@@ -198,6 +218,7 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
             endTime: formatTime12Hour(endVal),
             url: portalUrl,
             password: res.bookingPassword || null,
+            requireSignIn: res.bookingRequireSignIn || false,
           });
         } else {
           setOpenBookingModal(false);
@@ -216,6 +237,7 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
   const [copied, setCopied] = useState(false);
   const [shared, setShared] = useState(false);
   const [lockMeeting, setLockMeeting] = useState(false);
+  const [requireSignIn, setRequireSignIn] = useState(false);
   const [generatedPassword, setGeneratedPassword] = useState("");
   const [successMeetInfo, setSuccessMeetInfo] = useState<{
     title: string;
@@ -223,6 +245,7 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
     endTime: string;
     url: string;
     password?: string | null;
+    requireSignIn?: boolean;
   } | null>(null);
 
   const formatTime12Hour = (time24: string) => {
@@ -294,6 +317,12 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
     data.set("room", "Online Meet");
     data.set("startTime", startLocal.toISOString());
     data.set("endTime", endLocal.toISOString());
+    if (lockMeeting && generatedPassword) {
+      data.set("password", generatedPassword);
+    }
+    if (requireSignIn) {
+      data.set("requireSignIn", "true");
+    }
 
     try {
       const res = await createBooking(null, data);
@@ -306,6 +335,7 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
           endTime: formatTime12Hour(endVal),
           url: portalUrl,
           password: res.bookingPassword || null,
+          requireSignIn: res.bookingRequireSignIn || false,
         });
         await loadBookingsForDate(selectedDate);
       } else {
@@ -323,6 +353,7 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
       setCopied(false);
       setShared(false);
       setLockMeeting(false);
+      setRequireSignIn(false);
       setGeneratedPassword("");
       setSuccessMeetInfo(null);
     }
@@ -406,13 +437,72 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
       day: "numeric",
     });
   };
+  const adjustTimelineZoom = (delta: number) => {
+    setTimelineZoom((current) => {
+      const nextZoom = current + delta;
+      return Math.min(2.5, Math.max(0.75, Number(nextZoom.toFixed(2))));
+    });
+  };
+  const resetTimelineZoom = () => {
+    setTimelineZoom(1);
+  };
+  const timelineWidth = `${Math.round(timelineZoom * 100)}%`;
+  const timelineMinWidth = `${Math.round(1000 * timelineZoom)}px`;
+  const timelineZoomLabel = `${Math.round(timelineZoom * 100)}%`;
+  const timelineMarkerIntervalMinutes =
+    timelineZoom >= 2.25 ? 10 : timelineZoom >= 1.75 ? 15 : timelineZoom >= 1.25 ? 30 : 60;
+  const timelineMarkers = Array.from(
+    { length: (12 * 60) / timelineMarkerIntervalMinutes + 1 },
+    (_, index) => {
+      const totalMinutes = index * timelineMarkerIntervalMinutes;
+      const left = (totalMinutes / (12 * 60)) * 100;
+      const hour24 = 8 + Math.floor(totalMinutes / 60);
+      const minutes = totalMinutes % 60;
+      const isMajor = minutes === 0;
+
+      return {
+        key: `${hour24}-${minutes}`,
+        left,
+        label: formatTimelineMarker(hour24, minutes),
+        isMajor,
+      };
+    },
+  );
 
   // Hour display values: 8 AM to 8 PM
-  const HOURS = Array.from({ length: 13 }, (_, i) => 8 + i);
-  const formatHourLabel = (h: number) => {
-    const period = h >= 12 ? "PM" : "AM";
-    const displayHour = h % 12 === 0 ? 12 : h % 12;
-    return `${displayHour} ${period}`;
+  function formatTimelineMarker(hour24: number, minutes: number) {
+    const period = hour24 >= 12 ? "PM" : "AM";
+    const displayHour = hour24 % 12 === 0 ? 12 : hour24 % 12;
+    if (minutes === 0) {
+      return `${displayHour} ${period}`;
+    }
+    return `${displayHour}:${minutes.toString().padStart(2, "0")} ${period}`;
+  }
+
+  useEffect(() => {
+    const container = timelineScrollRef.current;
+    if (!container || currentTimeLeft === null) return;
+
+    const maxScrollLeft = Math.max(0, container.scrollWidth - container.clientWidth);
+    const targetScrollLeft = Math.max(
+      0,
+      Math.min(
+        (currentTimeLeft / 100) * container.scrollWidth - container.clientWidth / 2,
+        maxScrollLeft,
+      ),
+    );
+
+    container.scrollTo({
+      left: targetScrollLeft,
+      behavior: "smooth",
+    });
+  }, [currentTimeLeft, timelineZoom, selectedDate]);
+
+  const shouldShowMarkerLabel = (isMajor: boolean) => {
+    if (timelineMarkerIntervalMinutes >= 60) return isMajor;
+    if (timelineMarkerIntervalMinutes === 30) return true;
+    if (timelineMarkerIntervalMinutes === 15) return isMajor || timelineZoom >= 2;
+    return timelineZoom >= 2.25;
   };
 
   // Booking Card Render positioning helper
@@ -474,6 +564,8 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
       hour: "numeric",
       minute: "2-digit",
     });
+    const showJoinButton = b.room === "Online Meet" && b.status === "active";
+    const meetingHref = `/meet/${b.slug || b.id}`;
 
     // Calculate vertical splitting positioning
     const heightPercent = 100 / totalTracks;
@@ -494,45 +586,73 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
       >
         <div className="flex items-start justify-between gap-1 w-full">
           <div
-            className={`truncate font-semibold text-xs leading-tight ${b.status === "cancelled" ? "line-through opacity-75" : ""}`}
+            className={`min-w-0 flex-1 truncate font-semibold text-xs leading-tight ${b.status === "cancelled" ? "line-through opacity-75" : ""}`}
           >
             {b.status === "cancelled" ? `[Cancelled] ${b.title}` : b.title}
           </div>
-          {b.status === "active" && (isAdmin || b.bookedBy === email) && (
-            <button
-              onClick={async (e) => {
-                e.stopPropagation();
-                if (
-                  confirm(
-                    `Are you sure you want to cancel the booking "${b.title}"?`,
-                  )
-                ) {
-                  const res = await cancelBooking(b.id);
-                  if (res.success) {
-                    await loadBookingsForDate(selectedDate);
-                  } else {
-                    alert(res.message || "Failed to cancel booking.");
-                  }
-                }
-              }}
-              className="w-4 h-4 rounded hover:bg-black/10 flex items-center justify-center text-white/80 hover:text-white transition-colors cursor-pointer flex-shrink-0"
-              title="Cancel Booking"
-            >
-              <svg
-                width="10"
-                height="10"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="3"
-                strokeLinecap="round"
-                strokeLinejoin="round"
+          <div className="flex min-w-fit items-center gap-1 flex-shrink-0">
+            {showJoinButton && (
+              <a
+                href={meetingHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                className="inline-flex h-4 w-4 items-center justify-center rounded bg-white/20 text-white/90 transition-colors hover:bg-white/35 hover:text-white"
+                title="Join Online Meeting"
+                aria-label="Join Online Meeting"
               >
-                <line x1="18" y1="6" x2="6" y2="18"></line>
-                <line x1="6" y1="6" x2="18" y2="18"></line>
-              </svg>
-            </button>
-          )}
+                <svg
+                  width="8"
+                  height="8"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="3.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M23 7l-7 5 7 5V7z" />
+                  <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+                </svg>
+              </a>
+            )}
+            {b.status === "active" && (isAdmin || b.bookedBy === email) && (
+              <button
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  if (
+                    confirm(
+                      `Are you sure you want to cancel the booking "${b.title}"?`,
+                    )
+                  ) {
+                    const res = await cancelBooking(b.id);
+                    if (res.success) {
+                      await loadBookingsForDate(selectedDate);
+                    } else {
+                      alert(res.message || "Failed to cancel booking.");
+                    }
+                  }
+                }}
+                className="flex h-4 w-4 items-center justify-center rounded bg-black/10 text-white transition-colors hover:bg-black/20 cursor-pointer"
+                title="Cancel Booking"
+                aria-label="Cancel Booking"
+              >
+                <svg
+                  width="10"
+                  height="10"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="3"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <line x1="18" y1="6" x2="6" y2="18"></line>
+                  <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+              </button>
+            )}
+          </div>
         </div>
         <div className="flex items-center justify-between text-[10px] opacity-90 truncate gap-2 w-full">
           <span
@@ -542,35 +662,9 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
           >
             {startStr} - {endStr}
           </span>
-          {b.room === "Online Meet" && b.status === "active" ? (
-            <a
-              href={`/meet/${b.slug || b.id}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(e) => e.stopPropagation()}
-              className="inline-flex items-center gap-1 bg-white/20 hover:bg-white/40 text-[9px] font-bold px-1.5 py-0.5 rounded transition-all flex-shrink-0"
-              title="Join Online Meeting"
-            >
-              <svg
-                width="8"
-                height="8"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="3.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M23 7l-7 5 7 5V7z" />
-                <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
-              </svg>
-              Join
-            </a>
-          ) : (
-            <span className="opacity-75 hidden md:inline truncate">
-              {b.bookedByUsername}
-            </span>
-          )}
+          <span className="opacity-75 hidden md:inline truncate">
+            {b.bookedByUsername}
+          </span>
         </div>
       </div>
     );
@@ -595,7 +689,9 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
         <div className="flex items-center gap-4">
           <div className="hidden sm:flex flex-col text-right">
             <span className="text-xs text-gray-400">Signed in as</span>
-            <span className="text-xs font-semibold text-gray-700">{username || email}</span>
+            <span className="text-xs font-semibold text-gray-700">
+              {username || email}
+            </span>
           </div>
           <button
             onClick={() => startLogoutTransition(() => logoutAction())}
@@ -670,6 +766,61 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
             </div>
 
             <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2 rounded-xl border border-gray-200 bg-gray-50 px-2 py-1.5">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-400">
+                  Zoom
+                </span>
+                <button
+                  type="button"
+                  onClick={() => adjustTimelineZoom(-0.25)}
+                  disabled={timelineZoom <= 0.75}
+                  className="flex h-7 w-7 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-600 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
+                  aria-label="Zoom out timeline"
+                >
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <line x1="5" y1="12" x2="19" y2="12" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  onClick={resetTimelineZoom}
+                  className="min-w-14 rounded-lg border border-transparent px-2 py-1 text-[11px] font-semibold text-gray-600 transition-colors hover:bg-white"
+                  aria-label="Reset timeline zoom"
+                >
+                  {timelineZoomLabel}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => adjustTimelineZoom(0.25)}
+                  disabled={timelineZoom >= 2.5}
+                  className="flex h-7 w-7 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-600 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40"
+                  aria-label="Zoom in timeline"
+                >
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <line x1="12" y1="5" x2="12" y2="19" />
+                    <line x1="5" y1="12" x2="19" y2="12" />
+                  </svg>
+                </button>
+              </div>
+
               {/* Native Date Picker trigger */}
               <div className="relative">
                 <input
@@ -755,21 +906,24 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
             </div>
 
             {/* Right Horizontally Scrollable Column: Timeline Grid */}
-            <div className="flex-1 overflow-x-auto">
-              <div className="min-w-[1000px] flex flex-col divide-y divide-gray-100">
+            <div ref={timelineScrollRef} className="flex-1 overflow-x-auto">
+              <div
+                className="flex flex-col divide-y divide-gray-100"
+                style={{ width: timelineWidth, minWidth: timelineMinWidth }}
+              >
                 {/* Timeline hour labels header */}
                 <div className="h-12 relative bg-gray-50/50">
                   {/* Horizontal hours labels */}
-                  {HOURS.map((h, i) => {
-                    const left = (i / 12) * 100;
+                  {timelineMarkers.map((marker) => {
+                    if (!shouldShowMarkerLabel(marker.isMajor)) return null;
                     return (
                       <div
-                        key={h}
+                        key={marker.key}
                         className="absolute top-0 bottom-0 text-[10px] font-semibold text-gray-400 flex items-center justify-center transform -translate-x-1/2"
-                        style={{ left: `${left}%` }}
+                        style={{ left: `${marker.left}%` }}
                       >
                         <span className="bg-white px-1.5 py-0.5 rounded shadow-sm border border-gray-100">
-                          {formatHourLabel(h)}
+                          {marker.label}
                         </span>
                       </div>
                     );
@@ -832,13 +986,16 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
                       className="h-24 relative bg-gray-50/10 group"
                     >
                       {/* Vertical background gridlines */}
-                      {HOURS.map((_, i) => {
-                        const left = (i / 12) * 100;
+                      {timelineMarkers.map((marker) => {
                         return (
                           <div
-                            key={i}
-                            className="absolute top-0 bottom-0 border-l border-dashed border-gray-200/60 pointer-events-none"
-                            style={{ left: `${left}%` }}
+                            key={marker.key}
+                            className={`absolute top-0 bottom-0 pointer-events-none ${
+                              marker.isMajor
+                                ? "border-l border-dashed border-gray-200/70"
+                                : "border-l border-dotted border-gray-200/50"
+                            }`}
+                            style={{ left: `${marker.left}%` }}
                           />
                         );
                       })}
@@ -947,31 +1104,68 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
               <div className="flex flex-col gap-5 py-2 animate-in fade-in slide-in-from-bottom-2 duration-300">
                 <div className="flex flex-col items-center text-center gap-2">
                   <div className="w-12 h-12 bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 rounded-full flex items-center justify-center">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <svg
+                      width="24"
+                      height="24"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
                       <polyline points="20 6 9 17 4 12" />
                     </svg>
                   </div>
-                  <h3 className="text-lg font-bold text-gray-950">Online Meeting Scheduled</h3>
-                  <p className="text-xs text-gray-400 font-medium">Your virtual room is ready for participants.</p>
+                  <h3 className="text-lg font-bold text-gray-950">
+                    Online Meeting Scheduled
+                  </h3>
+                  <p className="text-xs text-gray-400 font-medium">
+                    Your virtual room is ready for participants.
+                  </p>
                 </div>
 
                 <div className="flex flex-col gap-3.5 bg-gray-50 border border-gray-150 rounded-2xl p-4 text-xs text-gray-700">
                   <div className="flex justify-between">
-                    <span className="text-gray-400 font-semibold uppercase tracking-wider text-[10px]">Title</span>
-                    <span className="font-bold text-gray-900 truncate max-w-[200px]">{successMeetInfo.title}</span>
+                    <span className="text-gray-400 font-semibold uppercase tracking-wider text-[10px]">
+                      Title
+                    </span>
+                    <span className="font-bold text-gray-900 truncate max-w-[200px]">
+                      {successMeetInfo.title}
+                    </span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-400 font-semibold uppercase tracking-wider text-[10px]">Time</span>
-                    <span className="font-bold text-gray-900">{successMeetInfo.startTime} - {successMeetInfo.endTime}</span>
+                    <span className="text-gray-400 font-semibold uppercase tracking-wider text-[10px]">
+                      Time
+                    </span>
+                    <span className="font-bold text-gray-900">
+                      {successMeetInfo.startTime} - {successMeetInfo.endTime}
+                    </span>
                   </div>
                   {successMeetInfo.password && (
                     <div className="flex justify-between">
-                      <span className="text-gray-400 font-semibold uppercase tracking-wider text-[10px]">Password</span>
-                      <span className="font-bold text-gray-900 font-mono select-all bg-white px-2 py-0.5 border border-gray-150 rounded-md">{successMeetInfo.password}</span>
+                      <span className="text-gray-400 font-semibold uppercase tracking-wider text-[10px]">
+                        Password
+                      </span>
+                      <span className="font-bold text-gray-900 font-mono select-all bg-white px-2 py-0.5 border border-gray-150 rounded-md">
+                        {successMeetInfo.password}
+                      </span>
+                    </div>
+                  )}
+                  {successMeetInfo.requireSignIn && (
+                    <div className="flex justify-between">
+                      <span className="text-gray-400 font-semibold uppercase tracking-wider text-[10px]">
+                        Access
+                      </span>
+                      <span className="font-bold text-gray-900">
+                        Signed-in participants only
+                      </span>
                     </div>
                   )}
                   <div className="flex flex-col gap-1.5 pt-2 border-t border-gray-200">
-                    <span className="text-gray-400 font-semibold uppercase tracking-wider text-[10px]">Meeting URL</span>
+                    <span className="text-gray-400 font-semibold uppercase tracking-wider text-[10px]">
+                      Meeting URL
+                    </span>
                     <input
                       type="text"
                       readOnly
@@ -997,15 +1191,36 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
                   >
                     {copied ? (
                       <>
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                        <svg
+                          width="12"
+                          height="12"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="3"
+                        >
                           <polyline points="20 6 9 17 4 12" />
                         </svg>
                         Copied Link!
                       </>
                     ) : (
                       <>
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                        <svg
+                          width="12"
+                          height="12"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2.5"
+                        >
+                          <rect
+                            x="9"
+                            y="9"
+                            width="13"
+                            height="13"
+                            rx="2"
+                            ry="2"
+                          />
                           <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
                         </svg>
                         Copy Link
@@ -1021,8 +1236,15 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
                         `Title: ${successMeetInfo.title}`,
                         `Time: ${successMeetInfo.startTime} - ${successMeetInfo.endTime}`,
                         `Link: ${successMeetInfo.url}`,
-                        successMeetInfo.password ? `Password: ${successMeetInfo.password}` : ""
-                      ].filter(Boolean).join("\n");
+                        successMeetInfo.password
+                          ? `Password: ${successMeetInfo.password}`
+                          : "",
+                        successMeetInfo.requireSignIn
+                          ? "Sign-in required for attendees"
+                          : "",
+                      ]
+                        .filter(Boolean)
+                        .join("\n");
                       navigator.clipboard.writeText(shareText);
                       setShared(true);
                       setTimeout(() => setShared(false), 2000);
@@ -1033,7 +1255,14 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
                         : "bg-indigo-600 hover:bg-indigo-750 border-indigo-600 text-white shadow-sm shadow-indigo-500/10"
                     }`}
                   >
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.5"
+                    >
                       <circle cx="18" cy="5" r="3" />
                       <circle cx="6" cy="12" r="3" />
                       <circle cx="18" cy="19" r="3" />
@@ -1256,7 +1485,9 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
                             onClick={() => setSelectedRoom(rm.id)}
                             className={`border rounded-xl p-3 text-left flex flex-col justify-between cursor-pointer transition-all duration-150 ${isSelected ? rm.selectedBg : "border-gray-200 hover:border-gray-300"}`}
                           >
-                            <span className="text-xs font-bold leading-tight truncate">{rm.id}</span>
+                            <span className="text-xs font-bold leading-tight truncate">
+                              {rm.id}
+                            </span>
                             <span className="text-[10px] text-gray-400 font-medium leading-none">
                               {rm.capacity}
                             </span>
@@ -1275,17 +1506,43 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
                   {selectedRoom === "Online Meet" && (
                     <div className="flex flex-col gap-2 p-3 bg-gray-50 border border-gray-150 rounded-xl animate-in fade-in slide-in-from-top-1 duration-200">
                       <div className="flex items-center justify-between">
-                        <label htmlFor="lock-meeting-checkbox" className="text-xs font-semibold text-gray-700 flex items-center gap-2 cursor-pointer">
+                        <label
+                          htmlFor="lock-meeting-checkbox"
+                          className="text-xs font-semibold text-gray-700 flex items-center gap-2 cursor-pointer"
+                        >
                           <input
                             id="lock-meeting-checkbox"
                             type="checkbox"
                             checked={lockMeeting}
-                            onChange={(e) => handleLockMeetingChange(e.target.checked)}
+                            onChange={(e) =>
+                              handleLockMeetingChange(e.target.checked)
+                            }
                             className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
                           />
                           Lock meeting with a password
                         </label>
                       </div>
+                      <div className="flex items-center justify-between">
+                        <label
+                          htmlFor="require-signin-checkbox"
+                          className="text-xs font-semibold text-gray-700 flex items-center gap-2 cursor-pointer"
+                        >
+                          <input
+                            id="require-signin-checkbox"
+                            name="requireSignIn"
+                            type="checkbox"
+                            checked={requireSignIn}
+                            value="true"
+                            onChange={(e) => setRequireSignIn(e.target.checked)}
+                            className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                          />
+                          Lock meeting for external participants
+                        </label>
+                      </div>
+                      <p className="text-[10px] text-gray-400 font-medium">
+                        When enabled, every attendee must be signed in before
+                        they can access the online meet.
+                      </p>
                       {lockMeeting && (
                         <div className="flex flex-col gap-1.5 mt-1 animate-in fade-in duration-200">
                           <div className="flex items-center gap-2">
@@ -1304,14 +1561,24 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
                               className="px-2.5 py-1.5 bg-white border border-gray-200 hover:border-gray-300 rounded-lg text-[10px] font-bold text-gray-600 hover:text-gray-900 transition-colors flex items-center gap-1 cursor-pointer"
                               title="Generate new password"
                             >
-                              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                                <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+                              <svg
+                                width="10"
+                                height="10"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2.5"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              >
+                                <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
                               </svg>
                               Regen
                             </button>
                           </div>
                           <p className="text-[10px] text-gray-400 font-medium">
-                            People will need this password to join the online meet.
+                            People will need this password to join the online
+                            meet.
                           </p>
                         </div>
                       )}
@@ -1363,11 +1630,14 @@ export default function HomeClient({ isFirstLogin, email, username, isAdmin }: P
                         name="startTimeInput"
                         type="time"
                         min="08:00"
+                        defaultValue={currentTime}
                         max="19:59"
                         className={inputBase}
                         aria-invalid={!!bookingState?.errors?.startTime}
                         aria-describedby={
-                          bookingState?.errors?.startTime ? "start-err" : undefined
+                          bookingState?.errors?.startTime
+                            ? "start-err"
+                            : undefined
                         }
                       />
                       {bookingState?.errors?.startTime && (

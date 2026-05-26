@@ -1,8 +1,37 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { LiveKitRoom, VideoConference } from "@livekit/components-react";
+import { isParticipantInRoom } from "@/app/actions/livekit";
+import {
+  CarouselLayout,
+  ChatToggle,
+  ConnectionStateToast,
+  DisconnectButton,
+  FocusLayout,
+  FocusLayoutContainer,
+  GearIcon,
+  GridLayout,
+  isTrackReference,
+  LayoutContextProvider,
+  LeaveIcon as LiveKitLeaveIcon,
+  LiveKitRoom,
+  MediaDeviceSelect,
+  ParticipantTile,
+  RoomAudioRenderer,
+  StartMediaButton,
+  TrackToggle,
+  useCreateLayoutContext,
+  usePinnedTracks,
+  useTracks,
+} from "@livekit/components-react";
+import {
+  isEqualTrackRef,
+  isWeb,
+  type TrackReferenceOrPlaceholder,
+  type WidgetState,
+} from "@livekit/components-core";
+import { RoomEvent, Track } from "livekit-client";
 import "@livekit/components-styles";
 
 interface Props {
@@ -10,6 +39,9 @@ interface Props {
   slug: string | null;
   title: string;
   host: string;
+  hostEmail: string;
+  viewerIsHost: boolean;
+  roomName: string;
   startTime: string;
   endTime: string;
   livekitToken: string | null;
@@ -25,11 +57,587 @@ interface ChatMessage {
   isMe: boolean;
 }
 
+interface ReactionBubble {
+  id: string;
+  emoji: string;
+  x: number;
+}
+
+const REACTION_EMOJIS = ["👍", "❤️", "😂", "🎉", "😮", "👏"];
+
+function formatTime(value: string) {
+  return new Date(value).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function formatDuration(totalMilliseconds: number) {
+  const totalSeconds = Math.max(0, Math.floor(totalMilliseconds / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}:${minutes.toString().padStart(2, "0")}:${seconds
+      .toString()
+      .padStart(2, "0")}`;
+  }
+
+  return `${minutes.toString().padStart(2, "0")}:${seconds
+    .toString()
+    .padStart(2, "0")}`;
+}
+
+function buildShareText(
+  title: string,
+  startTime: string,
+  endTime: string,
+  password: string | null,
+) {
+  return [
+    "Join this meeting",
+    `Title: ${title}`,
+    `Time: ${formatTime(startTime)} - ${formatTime(endTime)}`,
+    `Link: ${window.location.href}`,
+    password ? `Password: ${password}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+async function copyText(text: string, successMessage: string) {
+  await navigator.clipboard.writeText(text);
+  window.alert(successMessage);
+}
+
+function MeetingHeader({
+  title,
+  host,
+  meetingLabel,
+  timeLeft,
+  badge,
+  onCopyLink,
+  onShare,
+}: {
+  title: string;
+  host: string;
+  meetingLabel: string;
+  timeLeft: string;
+  badge?: string;
+  onCopyLink: () => void;
+  onShare: () => void;
+}) {
+  return (
+    <div className="pointer-events-none absolute inset-x-0 top-0 z-40 px-3 pt-3 sm:px-4 sm:pt-4">
+      <div className="mx-auto flex max-w-[1600px] items-center justify-between gap-3">
+        <div className="pointer-events-auto meet-topbar min-w-0">
+          <div className="min-w-0">
+            <div className="truncate text-sm font-medium text-white">
+              {title}
+            </div>
+            <div className="truncate text-[11px] text-white/56">
+              Host: {host} <span className="mx-1 text-white/28">•</span>{" "}
+              {meetingLabel}
+            </div>
+          </div>
+        </div>
+
+        <div className="pointer-events-auto flex items-center gap-2">
+          <div className="meet-compact-info hidden sm:flex">
+            <span className="text-white/42">{badge || "Elapsed"}</span>
+            <span className="font-medium text-white">
+              {timeLeft || "--:--"}
+            </span>
+          </div>
+          <button
+            onClick={onCopyLink}
+            className="meet-chip"
+            type="button"
+            title="Copy invite link"
+          >
+            <LinkIcon />
+          </button>
+          <button
+            onClick={onShare}
+            className="meet-chip"
+            type="button"
+            title="Share meeting details"
+          >
+            <ShareIcon />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PreMeetingGate({
+  title,
+  countdown,
+  viewerIsHost,
+  hostWaiting,
+  earlyJoinAvailable,
+  isCheckingEarlyJoin,
+  onStartEarly,
+  onWait,
+}: {
+  title: string;
+  countdown: string;
+  viewerIsHost: boolean;
+  hostWaiting?: boolean;
+  earlyJoinAvailable: boolean;
+  isCheckingEarlyJoin: boolean;
+  onStartEarly?: () => void;
+  onWait?: () => void;
+}) {
+  return (
+    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[#202124] px-4 text-white">
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(138,180,248,0.14),_transparent_30%),linear-gradient(180deg,_#202124,_#1f1f1f)]" />
+      <div className="meet-panel relative justify-center items-center z-10 w-full max-w-xl flex flex-col p-8">
+        <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-2xl bg-[#8ab4f8]/15 text-[#8ab4f8]">
+          <ClockIcon />
+        </div>
+        <div className="text-xs font-medium uppercase tracking-[0.18em] text-white/45">
+          {viewerIsHost ? "Host controls" : "Waiting room"}
+        </div>
+        <h1 className="mt-3 text-2xl  text-center font-medium text-white">
+          {title}
+        </h1>
+        {viewerIsHost ? (
+          <p className="mt-2 text-sm leading-6 text-white/62 text-center">
+            {hostWaiting
+              ? "You chose to wait. You can still start the meeting any time before the scheduled start."
+              : "You joined before the scheduled start time. Do you want to start this meeting early?"}
+          </p>
+        ) : earlyJoinAvailable ? (
+          <p className="mt-2 text-sm leading-6 text-[#8ab4f8]">
+            The host has already joined. You can enter now.
+          </p>
+        ) : (
+          <p className="mt-2 text-sm leading-6 text-white/62">
+            This meeting starts at the scheduled time. You can join when the
+            countdown reaches zero.
+          </p>
+        )}
+
+        <div className="mt-6 rounded-3xl border border-white/8 bg-white/5 p-6">
+          <div className="text-xs uppercase tracking-[0.18em] text-white/40">
+            Starts in
+          </div>
+          <div className="mt-2 text-4xl font-semibold text-white sm:text-5xl">
+            {countdown}
+          </div>
+        </div>
+
+        <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+          {viewerIsHost ? (
+            <>
+              <button
+                type="button"
+                onClick={onStartEarly}
+                className="rounded-full bg-[#8ab4f8] px-5 py-3 text-sm font-medium text-[#202124] transition hover:bg-[#9ec1fb]"
+              >
+                Start meeting now
+              </button>
+              <button
+                type="button"
+                onClick={onWait}
+                className="rounded-full border border-white/12 bg-white/6 px-5 py-3 text-sm font-medium text-white transition hover:bg-white/10"
+              >
+                {hostWaiting ? "Keep waiting" : "Wait for scheduled time"}
+              </button>
+            </>
+          ) : (
+            <></>
+            // <div className="rounded-full border border-white/10 bg-white/6 px-5 py-3 text-sm text-white/72">
+            //   {isCheckingEarlyJoin
+            //     ? "Checking whether the host has started early..."
+            //     : "Countdown updates automatically."}
+            // </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function JoinGate({
+  enteredPassword,
+  setEnteredPassword,
+  passwordError,
+  onSubmit,
+}: {
+  enteredPassword: string;
+  setEnteredPassword: (value: string) => void;
+  passwordError: string;
+  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
+}) {
+  return (
+    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[#202124] px-4 text-white">
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(255,255,255,0.04),_transparent_32%),linear-gradient(180deg,_#202124,_#1f1f1f)]" />
+      <div className="meet-panel relative z-10 w-full flex flex-col max-w-xl p-8">
+        <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-2xl bg-white/8 text-white">
+          <LockIcon />
+        </div>
+        <h1 className="text-2xl font-medium text-white">Meeting locked</h1>
+        <p className="mt-2 text-sm leading-6 text-white/62">
+          Enter the password to join this room.
+        </p>
+        <form onSubmit={onSubmit} className="mt-7 flex flex-col gap-4">
+          <input
+            type="password"
+            placeholder="Enter password"
+            value={enteredPassword}
+            onChange={(event) => setEnteredPassword(event.target.value)}
+            className="rounded-2xl border border-white/10 bg-white/6 px-4 py-3 text-sm text-white outline-none transition focus:border-white/24"
+            autoFocus
+          />
+          {passwordError ? (
+            <p className="text-xs font-medium text-[#f28b82]">
+              {passwordError}
+            </p>
+          ) : null}
+          <button
+            type="submit"
+            className="rounded-full bg-[#8ab4f8] px-4 py-3 text-sm font-medium text-[#202124] transition hover:bg-[#9ec1fb]"
+          >
+            Join meeting
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function ReactionOverlay({ reactions }: { reactions: ReactionBubble[] }) {
+  return (
+    <div className="pointer-events-none absolute inset-0 z-30 overflow-hidden">
+      {reactions.map((reaction) => (
+        <div
+          key={reaction.id}
+          className="absolute bottom-28 text-4xl animate-float-up sm:bottom-36"
+          style={{ left: `${reaction.x}%` }}
+        >
+          {reaction.emoji}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ReactionPicker({
+  open,
+  setOpen,
+  onSelect,
+}: {
+  open: boolean;
+  setOpen: (value: boolean) => void;
+  onSelect: (emoji: string) => void;
+}) {
+  return (
+    <div className="pointer-events-auto relative">
+      <button
+        type="button"
+        className={`meet-control-fab ${open ? "meet-control-fab--accent" : "meet-control-fab--on"}`}
+        onClick={() => setOpen(!open)}
+        title="Reactions"
+      >
+        <ReactionIcon />
+      </button>
+      {open ? (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="meet-popover absolute bottom-14 right-0 z-50 flex gap-2 p-2">
+            {REACTION_EMOJIS.map((emoji) => (
+              <button
+                key={emoji}
+                type="button"
+                className="flex h-10 w-10 items-center justify-center rounded-full bg-white/8 text-xl transition hover:-translate-y-0.5 hover:bg-white/14"
+                onClick={() => {
+                  onSelect(emoji);
+                  setOpen(false);
+                }}
+              >
+                {emoji}
+              </button>
+            ))}
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function LiveRoomSettings() {
+  return (
+    <div className="meet-settings-panel">
+      <div className="meet-settings-panel__header">
+        <div>
+          <h2 className="text-base font-medium text-white">Settings</h2>
+          <p className="mt-1 text-sm text-white/56">
+            Select microphone and camera sources.
+          </p>
+        </div>
+      </div>
+
+      <div className="meet-settings-panel__section">
+        <div className="meet-settings-panel__label">Microphone</div>
+        <MediaDeviceSelect
+          kind="audioinput"
+          requestPermissions
+          className="lk-media-device-select meet-settings-list"
+        />
+      </div>
+
+      <div className="meet-settings-panel__section">
+        <div className="meet-settings-panel__label">Camera</div>
+        <MediaDeviceSelect
+          kind="videoinput"
+          requestPermissions
+          className="lk-media-device-select meet-settings-list"
+        />
+      </div>
+    </div>
+  );
+}
+
+function MinimalVideoConference({
+  SettingsComponent,
+  showReactions,
+  setShowReactions,
+  addReaction,
+}: {
+  SettingsComponent?: React.ComponentType;
+  showReactions: boolean;
+  setShowReactions: (value: boolean) => void;
+  addReaction: (emoji: string) => void;
+}) {
+  const [widgetState, setWidgetState] = useState<WidgetState>({
+    showChat: false,
+    unreadMessages: 0,
+    showSettings: false,
+  });
+  const lastAutoFocusedScreenShareTrack =
+    useRef<TrackReferenceOrPlaceholder | null>(null);
+  const layoutContext = useCreateLayoutContext();
+
+  const tracks = useTracks(
+    [
+      { source: Track.Source.Camera, withPlaceholder: true },
+      { source: Track.Source.ScreenShare, withPlaceholder: false },
+    ],
+    { updateOnlyOn: [RoomEvent.ActiveSpeakersChanged], onlySubscribed: false },
+  );
+
+  const screenShareTracks = tracks
+    .filter(isTrackReference)
+    .filter((track) => track.publication.source === Track.Source.ScreenShare);
+
+  const focusTrack = usePinnedTracks(layoutContext)?.[0];
+  const carouselTracks = tracks.filter(
+    (track) => !isEqualTrackRef(track, focusTrack),
+  );
+
+  useEffect(() => {
+    if (
+      screenShareTracks.some((track) => track.publication.isSubscribed) &&
+      lastAutoFocusedScreenShareTrack.current === null
+    ) {
+      layoutContext.pin.dispatch?.({
+        msg: "set_pin",
+        trackReference: screenShareTracks[0],
+      });
+      lastAutoFocusedScreenShareTrack.current = screenShareTracks[0];
+    } else if (
+      lastAutoFocusedScreenShareTrack.current &&
+      !screenShareTracks.some(
+        (track) =>
+          track.publication.trackSid ===
+          lastAutoFocusedScreenShareTrack.current?.publication?.trackSid,
+      )
+    ) {
+      layoutContext.pin.dispatch?.({ msg: "clear_pin" });
+      lastAutoFocusedScreenShareTrack.current = null;
+    }
+
+    if (focusTrack && !isTrackReference(focusTrack)) {
+      const updatedFocusTrack = tracks.find(
+        (track) =>
+          track.participant.identity === focusTrack.participant.identity &&
+          track.source === focusTrack.source,
+      );
+      if (
+        updatedFocusTrack !== focusTrack &&
+        isTrackReference(updatedFocusTrack)
+      ) {
+        layoutContext.pin.dispatch?.({
+          msg: "set_pin",
+          trackReference: updatedFocusTrack,
+        });
+      }
+    }
+  }, [focusTrack, layoutContext.pin, screenShareTracks, tracks]);
+
+  return (
+    <div className="lk-video-conference">
+      {isWeb() ? (
+        <LayoutContextProvider
+          value={layoutContext}
+          onWidgetChange={(state) => setWidgetState(state)}
+        >
+          <div className="lk-video-conference-inner">
+            {!focusTrack ? (
+              <div className="lk-grid-layout-wrapper">
+                <GridLayout tracks={tracks}>
+                  <ParticipantTile />
+                </GridLayout>
+              </div>
+            ) : (
+              <div className="lk-focus-layout-wrapper">
+                <FocusLayoutContainer>
+                  <CarouselLayout tracks={carouselTracks}>
+                    <ParticipantTile />
+                  </CarouselLayout>
+                  <FocusLayout trackRef={focusTrack} />
+                </FocusLayoutContainer>
+              </div>
+            )}
+            <div className="meet-live-dock-wrap">
+              <div className="meet-dock meet-live-dock">
+                <TrackToggle
+                  source={Track.Source.Microphone}
+                  showIcon
+                  title="Toggle mic"
+                />
+                <TrackToggle
+                  source={Track.Source.Camera}
+                  showIcon
+                  title="Toggle camera"
+                />
+                <TrackToggle
+                  source={Track.Source.ScreenShare}
+                  showIcon
+                  title="Toggle screen share"
+                  captureOptions={{
+                    audio: true,
+                    selfBrowserSurface: "include",
+                  }}
+                />
+                <ChatToggle title="Toggle chat">
+                  <ChatIcon />
+                </ChatToggle>
+                <ReactionPicker
+                  open={showReactions}
+                  setOpen={setShowReactions}
+                  onSelect={addReaction}
+                />
+                {SettingsComponent ? (
+                  <button
+                    type="button"
+                    className="lk-button"
+                    title="Settings"
+                    aria-pressed={widgetState.showSettings ? "true" : "false"}
+                    onClick={() =>
+                      layoutContext.widget.dispatch?.({
+                        msg: "toggle_settings",
+                      })
+                    }
+                  >
+                    <GearIcon />
+                  </button>
+                ) : null}
+                <DisconnectButton title="Leave">
+                  <LiveKitLeaveIcon />
+                </DisconnectButton>
+                <StartMediaButton />
+              </div>
+            </div>
+          </div>
+          {SettingsComponent ? (
+            <div
+              className="lk-settings-menu-modal"
+              style={{ display: widgetState.showSettings ? "block" : "none" }}
+            >
+              <SettingsComponent />
+            </div>
+          ) : null}
+        </LayoutContextProvider>
+      ) : null}
+      <RoomAudioRenderer />
+      <ConnectionStateToast />
+    </div>
+  );
+}
+
+function ControlFab({
+  active,
+  accent,
+  title,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  accent?: boolean;
+  title: string;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={onClick}
+      className={`meet-control-fab ${
+        accent
+          ? "meet-control-fab--accent"
+          : active
+            ? "meet-control-fab--on"
+            : "meet-control-fab--off"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function ParticipantCard({
+  name,
+  subtitle,
+  accent,
+}: {
+  name: string;
+  subtitle: string;
+  accent?: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between rounded-2xl border border-white/8 bg-white/5 px-4 py-3">
+      <div className="flex items-center gap-3">
+        <div
+          className={`flex h-10 w-10 items-center justify-center rounded-full text-sm font-medium ${
+            accent ? "bg-[#8ab4f8] text-[#202124]" : "bg-[#3c4043] text-white"
+          }`}
+        >
+          {name.slice(0, 2).toUpperCase()}
+        </div>
+        <div>
+          <div className="text-sm font-medium text-white">{name}</div>
+          <div className="text-xs text-white/48">{subtitle}</div>
+        </div>
+      </div>
+      <span className="h-2.5 w-2.5 rounded-full bg-[#34a853]" />
+    </div>
+  );
+}
+
 export default function MeetClient({
   meetingId,
   slug,
   title,
   host,
+  hostEmail,
+  viewerIsHost,
+  roomName,
   startTime,
   endTime,
   livekitToken,
@@ -38,272 +646,205 @@ export default function MeetClient({
 }: Props) {
   const router = useRouter();
   const [useDemoMode, setUseDemoMode] = useState(false);
-  const [reactions, setReactions] = useState<{ id: string; emoji: string; x: number }[]>([]);
+  const [reactions, setReactions] = useState<ReactionBubble[]>([]);
   const [showReactions, setShowReactions] = useState(false);
-
   const [enteredPassword, setEnteredPassword] = useState("");
   const [isUnlocked, setIsUnlocked] = useState(!password);
   const [passwordError, setPasswordError] = useState("");
+  const [now, setNow] = useState(() => Date.now());
+  const [hostEarlyStartConfirmed, setHostEarlyStartConfirmed] = useState(false);
+  const [hostWaitingForScheduledTime, setHostWaitingForScheduledTime] =
+    useState(false);
+  const [attendeeMayJoinEarly, setAttendeeMayJoinEarly] = useState(false);
+  const [isCheckingEarlyJoin, setIsCheckingEarlyJoin] = useState(false);
+
+  const hasLiveKitConfig = Boolean(livekitToken && livekitUrl);
+  const meetingLabel = `Meeting ID: ${slug || meetingId}`;
+  const startTimestamp = new Date(startTime).getTime();
+  const isBeforeStart = now < startTimestamp;
+  const countdown = formatDuration(Math.max(0, startTimestamp - now));
+  const elapsedTime = formatDuration(Math.max(0, now - startTimestamp));
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    if (
+      viewerIsHost ||
+      !isUnlocked ||
+      !isBeforeStart ||
+      attendeeMayJoinEarly ||
+      !hasLiveKitConfig
+    ) {
+      return;
+    }
+
+    let isActive = true;
+
+    const checkForHost = async () => {
+      setIsCheckingEarlyJoin(true);
+      const hostHasJoined = await isParticipantInRoom(roomName, hostEmail);
+      if (isActive && hostHasJoined) {
+        setAttendeeMayJoinEarly(true);
+      }
+      if (isActive) {
+        setIsCheckingEarlyJoin(false);
+      }
+    };
+
+    void checkForHost();
+    const interval = window.setInterval(() => {
+      void checkForHost();
+    }, 10000);
+
+    return () => {
+      isActive = false;
+      window.clearInterval(interval);
+    };
+  }, [
+    attendeeMayJoinEarly,
+    hasLiveKitConfig,
+    hostEmail,
+    isBeforeStart,
+    isUnlocked,
+    roomName,
+    viewerIsHost,
+  ]);
 
   const addReaction = (emoji: string) => {
-    const id = Math.random().toString();
-    const x = Math.random() * 60 + 20; // center values (20% - 80%)
-    setReactions((prev) => [...prev, { id, emoji, x }]);
-    setTimeout(() => {
-      setReactions((prev) => prev.filter((r) => r.id !== id));
-    }, 2000);
+    const id = Math.random().toString(36).slice(2);
+    const x = Math.random() * 60 + 20;
+    setReactions((current) => [...current, { id, emoji, x }]);
+    window.setTimeout(() => {
+      setReactions((current) =>
+        current.filter((reaction) => reaction.id !== id),
+      );
+    }, 2200);
   };
 
-  if (!isUnlocked) {
+  const handleCopyLink = async () => {
+    await copyText(window.location.href, "Meeting link copied to clipboard.");
+  };
+
+  const handleShare = async () => {
+    await copyText(
+      buildShareText(title, startTime, endTime, password),
+      "Meeting details copied to clipboard.",
+    );
+  };
+
+  if (!isUnlocked && password) {
     return (
-      <div className="min-h-screen bg-white text-gray-800 flex items-center justify-center flex-col gap-4 px-4 font-sans">
-        <div className="max-w-md w-full text-center bg-gray-50 border border-gray-200 rounded-2xl p-8 shadow-sm">
-          <div className="w-16 h-16 bg-indigo-500/10 border border-indigo-500/20 text-indigo-500 rounded-full flex items-center justify-center mx-auto mb-5">
-            <svg
-              width="28"
-              height="28"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-            </svg>
-          </div>
-          <h1 className="text-xl font-bold text-gray-900 mb-2">Password Protected</h1>
-          <p className="text-gray-500 text-sm mb-6 leading-relaxed">
-            This online meeting is locked. Please enter the password to join.
-          </p>
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (enteredPassword === password) {
-                setIsUnlocked(true);
-                setPasswordError("");
-              } else {
-                setPasswordError("Incorrect password. Please try again.");
-              }
-            }}
-            className="flex flex-col gap-4"
-          >
-            <div className="flex flex-col gap-1 text-left">
-              <input
-                type="password"
-                placeholder="Enter password"
-                value={enteredPassword}
-                onChange={(e) => {
-                  setEnteredPassword(e.target.value);
-                  setPasswordError("");
-                }}
-                className="w-full px-3 py-2.5 rounded-lg border border-gray-300 bg-white text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:border-indigo-500 transition-colors"
-                autoFocus
-              />
-              {passwordError && (
-                <p className="text-xs text-red-655 mt-1 font-medium">{passwordError}</p>
-              )}
-            </div>
-            <button
-              type="submit"
-              className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-xl transition-all duration-200 shadow-sm shadow-indigo-500/10 cursor-pointer"
-            >
-              Join Meeting
-            </button>
-          </form>
-        </div>
-      </div>
+      <JoinGate
+        enteredPassword={enteredPassword}
+        setEnteredPassword={(value) => {
+          setEnteredPassword(value);
+          setPasswordError("");
+        }}
+        passwordError={passwordError}
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (enteredPassword === password) {
+            setIsUnlocked(true);
+            setPasswordError("");
+            return;
+          }
+          setPasswordError("Incorrect password. Please try again.");
+        }}
+      />
     );
   }
 
-  // If LiveKit is configured and we don't force demo mode, run real LiveKit conference!
-  const hasLiveKitConfig = livekitToken && livekitUrl;
+  if (isBeforeStart && viewerIsHost && !hostEarlyStartConfirmed) {
+    return (
+      <PreMeetingGate
+        title={title}
+        countdown={countdown}
+        viewerIsHost
+        hostWaiting={hostWaitingForScheduledTime}
+        earlyJoinAvailable={false}
+        isCheckingEarlyJoin={false}
+        onStartEarly={() => setHostEarlyStartConfirmed(true)}
+        onWait={() => setHostWaitingForScheduledTime(true)}
+      />
+    );
+  }
+
+  if (isBeforeStart && !viewerIsHost && !attendeeMayJoinEarly) {
+    return (
+      <PreMeetingGate
+        title={title}
+        countdown={countdown}
+        viewerIsHost={false}
+        earlyJoinAvailable={false}
+        isCheckingEarlyJoin={isCheckingEarlyJoin}
+      />
+    );
+  }
 
   if (hasLiveKitConfig && !useDemoMode) {
     return (
-      <div className="min-h-screen bg-white text-gray-800 flex flex-col font-sans overflow-hidden relative">
-        {/* Top Header */}
-        <header className="h-16 border-b border-gray-200 bg-white/80 backdrop-blur-md px-6 flex items-center justify-between z-10">
-          <div className="flex items-center gap-3">
-            {/*<div className="px-2.5 py-1 bg-emerald-50 border border-emerald-100 text-emerald-700 rounded-full text-[10px] font-bold tracking-widest flex items-center gap-1.5 uppercase">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping"></span>
-              LiveKit Active
-            </div>*/}
-            <div>
-              <h1 className="text-sm font-bold tracking-tight text-gray-900">{title}</h1>
-              <p className="text-[10px] text-gray-500 font-medium">Host: {host} · Meeting ID: {slug || meetingId}</p>
-            </div>
+      <div className="meet-shell">
+        <div className="meet-bg" />
+        <MeetingHeader
+          title={title}
+          host={host}
+          meetingLabel={meetingLabel}
+          timeLeft={elapsedTime}
+          badge="Live room"
+          onCopyLink={handleCopyLink}
+          onShare={handleShare}
+        />
+        <div className="relative z-10 h-screen overflow-hidden px-2 pb-2 pt-16 sm:px-3 sm:pb-3 sm:pt-[4.25rem]">
+          <div className="meet-stage meet-stage--live">
+            <LiveKitRoom
+              video
+              audio
+              token={livekitToken || undefined}
+              serverUrl={livekitUrl || undefined}
+              onDisconnected={() => router.push("/home")}
+              data-lk-theme="meet"
+              className="h-full w-full"
+            >
+              <MinimalVideoConference
+                SettingsComponent={LiveRoomSettings}
+                showReactions={showReactions}
+                setShowReactions={setShowReactions}
+                addReaction={addReaction}
+              />
+            </LiveKitRoom>
           </div>
-          <div className="flex items-center gap-4">
-            <button
-              onClick={() => {
-                navigator.clipboard.writeText(window.location.href);
-                alert("Meeting link copied to clipboard!");
-              }}
-              className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 text-xs font-semibold rounded-xl transition-all duration-200 cursor-pointer flex items-center gap-1.5"
-            >
-              <svg
-                width="12"
-                height="12"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-              </svg>
-              Invite link
-            </button>
-            <button
-              onClick={() => {
-                const fromStr = new Date(startTime).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-                const toStr = new Date(endTime).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-                const shareText = [
-                  "Hey everyone! Kindly join this meeting",
-                  `Title: ${title}`,
-                  `Time: ${fromStr} - ${toStr}`,
-                  `Link: ${window.location.href}`,
-                  password ? `Password: ${password}` : ""
-                ].filter(Boolean).join("\n");
-                navigator.clipboard.writeText(shareText);
-                alert("Meeting details copied to clipboard!");
-              }}
-              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-xl transition-all duration-200 cursor-pointer flex items-center gap-1.5 shadow-sm shadow-indigo-500/10"
-            >
-              <svg
-                width="12"
-                height="12"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <circle cx="18" cy="5" r="3" />
-                <circle cx="6" cy="12" r="3" />
-                <circle cx="18" cy="19" r="3" />
-                <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
-                <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
-              </svg>
-              Share
-            </button>
-          </div>
-        </header>
-
-        {/* LiveKit Video Conference Room */}
-        <div className="flex-1 relative">
-          <LiveKitRoom
-            video={true}
-            audio={true}
-            token={livekitToken}
-            serverUrl={livekitUrl}
-            onDisconnected={() => {
-              router.push("/home");
-            }}
-            data-lk-theme="default"
-            style={{ height: "calc(100vh - 64px)" }}
-          >
-            <VideoConference />
-          </LiveKitRoom>
         </div>
-
-        {/* Floating Reactions Overlay */}
-        <div className="absolute inset-0 pointer-events-none z-30 overflow-hidden">
-          {reactions.map((r) => (
-            <div
-              key={r.id}
-              className="absolute bottom-24 text-4xl animate-float-up"
-              style={{ left: `${r.x}%` }}
-            >
-              {r.emoji}
-            </div>
-          ))}
-        </div>
-
-        {/* Floating Reactions Trigger Button */}
-        <div className="absolute bottom-24 right-20 z-45">
-          <button
-            onClick={() => setShowReactions(!showReactions)}
-            className={`w-11 h-11 rounded-full flex items-center justify-center transition-all duration-200 cursor-pointer shadow-lg border ${
-              showReactions
-                ? "bg-indigo-50 border-indigo-200 text-indigo-600"
-                : "bg-white border-gray-200 text-gray-700 hover:bg-gray-50 hover:text-gray-900"
-            }`}
-            title="Reactions"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="12" r="10" />
-              <path d="M8 14s1.5 2 4 2 4-2 4-2" />
-              <line x1="9" y1="9" x2="9.01" y2="9" />
-              <line x1="15" y1="9" x2="15.01" y2="9" />
-            </svg>
-          </button>
-          {showReactions && (
-            <>
-              <div className="fixed inset-0 z-40" onClick={() => setShowReactions(false)} />
-              <div className="absolute bottom-14 right-0 bg-white border border-gray-200/80 rounded-2xl shadow-xl p-2.5 flex gap-2 z-50 animate-in fade-in slide-in-from-bottom-2 duration-150">
-                {["👍", "❤️", "😂", "🎉", "😮", "👏"].map((emoji) => (
-                  <button
-                    key={emoji}
-                    onClick={() => {
-                      addReaction(emoji);
-                      setShowReactions(false);
-                    }}
-                    className="w-8 h-8 rounded-lg hover:bg-gray-100 flex items-center justify-center text-xl transition-transform active:scale-125 cursor-pointer"
-                  >
-                    {emoji}
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
+        <ReactionOverlay reactions={reactions} />
       </div>
     );
   }
 
-  // --- DEMO MODE WORKFLOW (Simulated meeting client) ---
   return (
     <DemoMeetingPortal
-      meetingId={meetingId}
+      slug={slug}
       title={title}
       host={host}
       startTime={startTime}
       endTime={endTime}
-      hasConfig={!!hasLiveKitConfig}
+      hasConfig={hasLiveKitConfig}
       onConfigureDemo={() => setUseDemoMode(false)}
       reactions={reactions}
       addReaction={addReaction}
       showReactions={showReactions}
       setShowReactions={setShowReactions}
-      password={password}
+      meetingLabel={meetingLabel}
+      timeLeft={elapsedTime}
+      onCopyLink={handleCopyLink}
+      onShare={handleShare}
     />
   );
 }
 
-// Simulated mock portal to fall back to when LiveKit isn't configured
-interface DemoProps {
-  meetingId: number;
-  title: string;
-  host: string;
-  startTime: string;
-  endTime: string;
-  hasConfig: boolean;
-  onConfigureDemo: () => void;
-  reactions: { id: string; emoji: string; x: number }[];
-  addReaction: (emoji: string) => void;
-  showReactions: boolean;
-  setShowReactions: (show: boolean) => void;
-  password: string | null;
-}
-
 function DemoMeetingPortal({
-  meetingId,
+  slug,
   title,
   host,
   startTime,
@@ -314,30 +855,64 @@ function DemoMeetingPortal({
   addReaction,
   showReactions,
   setShowReactions,
-  password,
-}: DemoProps) {
+  meetingLabel,
+  timeLeft,
+  onCopyLink,
+  onShare,
+}: {
+  slug: string | null;
+  title: string;
+  host: string;
+  startTime: string;
+  endTime: string;
+  hasConfig: boolean;
+  onConfigureDemo: () => void;
+  reactions: ReactionBubble[];
+  addReaction: (emoji: string) => void;
+  showReactions: boolean;
+  setShowReactions: (show: boolean) => void;
+  meetingLabel: string;
+  timeLeft: string;
+  onCopyLink: () => void;
+  onShare: () => void;
+}) {
   const [micOn, setMicOn] = useState(true);
   const [cameraOn, setCameraOn] = useState(true);
   const [sharingScreen, setSharingScreen] = useState(false);
   const [showChat, setShowChat] = useState(true);
   const [activeTab, setActiveTab] = useState<"chat" | "people">("chat");
-
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
-
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
-      id: "1",
+      id: "seed-1",
       sender: host,
-      text: `Welcome to the online meeting portal! Glad you could join.`,
-      timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      text: "Welcome in. We can use this space to align before the room goes live.",
+      timestamp: formatTime(startTime),
+      isMe: false,
+    },
+    {
+      id: "seed-2",
+      sender: host,
+      text: "Controls stay docked at the bottom and chat floats on the side.",
+      timestamp: formatTime(startTime),
       isMe: false,
     },
   ]);
   const [inputText, setInputText] = useState("");
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
-  const [timeLeft, setTimeLeft] = useState("");
+
+  const stopCamera = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  };
 
   useEffect(() => {
     async function startCamera() {
@@ -355,514 +930,616 @@ function DemoMeetingPortal({
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
         }
-      } catch (err: any) {
-        console.error("Camera access failed:", err);
-        setStreamError("Camera not available or permission denied.");
+      } catch {
+        setStreamError("Camera unavailable or permission denied.");
       }
     }
 
     startCamera();
-
-    return () => {
-      stopCamera();
-    };
-  }, [cameraOn]);
+    return () => stopCamera();
+  }, [cameraOn, micOn]);
 
   useEffect(() => {
-    if (streamRef.current) {
-      const audioTracks = streamRef.current.getAudioTracks();
-      audioTracks.forEach((track) => {
-        track.enabled = micOn;
-      });
+    if (!streamRef.current) {
+      return;
     }
+    streamRef.current.getAudioTracks().forEach((track) => {
+      track.enabled = micOn;
+    });
   }, [micOn]);
-
-  const stopCamera = () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-  };
-
-  useEffect(() => {
-    const end = new Date(endTime).getTime();
-    const updateTimer = () => {
-      const now = Date.now();
-      const diff = end - now;
-      if (diff <= 0) {
-        setTimeLeft("Meeting ended");
-        return;
-      }
-      const h = Math.floor(diff / (1000 * 60 * 60));
-      const m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-      const s = Math.floor((diff % (1000 * 60)) / 1000);
-      const hoursPart = h > 0 ? `${h}:` : "";
-      const minsPart = m.toString().padStart(2, "0");
-      const secsPart = s.toString().padStart(2, "0");
-      setTimeLeft(`${hoursPart}${minsPart}:${secsPart}`);
-    };
-    updateTimer();
-    const interval = setInterval(updateTimer, 1000);
-    return () => clearInterval(interval);
-  }, [endTime]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, showChat]);
+  }, [messages, showChat, activeTab]);
 
-  const handleSendMessage = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inputText.trim()) return;
-    const newMsg: ChatMessage = {
-      id: Math.random().toString(),
-      sender: "You",
-      text: inputText,
-      timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-      isMe: true,
-    };
-    setMessages((prev) => [...prev, newMsg]);
+  const handleSendMessage = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!inputText.trim()) {
+      return;
+    }
+    setMessages((current) => [
+      ...current,
+      {
+        id: Math.random().toString(36).slice(2),
+        sender: "You",
+        text: inputText.trim(),
+        timestamp: formatTime(new Date().toISOString()),
+        isMe: true,
+      },
+    ]);
     setInputText("");
 
-    setTimeout(() => {
-      const hostReply: ChatMessage = {
-        id: Math.random().toString(),
-        sender: host,
-        text: "I hear you! Let's get started with the discussion.",
-        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        isMe: false,
-      };
-      setMessages((prev) => [...prev, hostReply]);
-      // Trigger automatic host emoji reaction
+    window.setTimeout(() => {
+      setMessages((current) => [
+        ...current,
+        {
+          id: Math.random().toString(36).slice(2),
+          sender: host,
+          text: "Looks good from my side. Keep going.",
+          timestamp: formatTime(new Date().toISOString()),
+          isMe: false,
+        },
+      ]);
       addReaction("👏");
-    }, 1500);
+    }, 1200);
   };
 
   return (
-    <div className="min-h-screen bg-white text-gray-800 flex flex-col font-sans overflow-hidden">
-      {/* Configuration Alert Banner */}
-      {!hasConfig && (
-        <div className="bg-gradient-to-r from-amber-600 to-amber-700 text-white px-6 py-3 flex items-center justify-between text-xs font-semibold shadow z-20">
-          <div className="flex items-center gap-2">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
-              <line x1="12" y1="9" x2="12" y2="13"/>
-              <line x1="12" y1="17" x2="12.01" y2="17"/>
-            </svg>
-            <span>LiveKit is not configured. Running in **Demo Mode**. Add `NEXT_PUBLIC_LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` to `.env` to connect.</span>
+    <div className="meet-shell">
+      <div className="meet-bg" />
+      {!hasConfig ? (
+        <div className="pointer-events-none absolute inset-x-0 top-0 z-50 px-3 pt-14 sm:px-4 sm:pt-16">
+          <div className="pointer-events-auto mx-auto max-w-[1600px] rounded-2xl border border-[#fbbc04]/20 bg-[#fbbc04]/10 px-4 py-3 text-xs text-[#fde293]">
+            LiveKit is not configured. This view is running in demo mode until
+            `NEXT_PUBLIC_LIVEKIT_URL`, `LIVEKIT_API_KEY`, and
+            `LIVEKIT_API_SECRET` are added.
           </div>
-          <button
-            onClick={() => {
-              alert("Please add these keys to your .env file:\nLIVEKIT_API_KEY=...\nLIVEKIT_API_SECRET=...\nNEXT_PUBLIC_LIVEKIT_URL=...\nThen restart the server.");
-            }}
-            className="bg-white/20 hover:bg-white/30 px-3 py-1 rounded transition-colors text-[10px] uppercase font-bold"
-          >
-            Setup Guide
-          </button>
         </div>
-      )}
+      ) : null}
+      <MeetingHeader
+        title={title}
+        host={host}
+        meetingLabel={meetingLabel}
+        timeLeft={timeLeft}
+        badge="Demo room"
+        onCopyLink={onCopyLink}
+        onShare={onShare}
+      />
+      <ReactionOverlay reactions={reactions} />
 
-      {/* Top Header */}
-      <header className="h-16 border-b border-gray-200/60 bg-white/85 backdrop-blur-md px-6 flex items-center justify-between z-10">
-        <div className="flex items-center gap-3">
-          <div className="px-2.5 py-1 bg-indigo-50 border border-indigo-100 text-indigo-700 rounded-full text-[10px] font-bold tracking-widest flex items-center gap-1.5 uppercase">
-            <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-ping"></span>
-            Demo Mode
-          </div>
-          <div>
-            <h1 className="text-sm font-bold tracking-tight text-gray-900">{title}</h1>
-            <p className="text-[10px] text-gray-500 font-medium">Host: {host}</p>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-4">
-          {hasConfig && (
-            <button
-              onClick={onConfigureDemo}
-              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-xl transition-all duration-200 cursor-pointer"
-            >
-              Use LiveKit Room
-            </button>
-          )}
-          <div className="px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold text-gray-700">
-            Time Left: <span className="font-mono text-emerald-600 font-bold">{timeLeft || "--:--"}</span>
-          </div>
-          <button
-            onClick={() => {
-              navigator.clipboard.writeText(window.location.href);
-              alert("Meeting link copied to clipboard!");
-            }}
-            className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 text-xs font-semibold rounded-xl transition-all duration-200 cursor-pointer flex items-center gap-1.5"
-          >
-            <svg
-              width="12"
-              height="12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-            </svg>
-            Invite link
-          </button>
-          <button
-            onClick={() => {
-              const fromStr = new Date(startTime).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-              const toStr = new Date(endTime).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-              const shareText = [
-                "Hey everyone! Kindly join this meeting",
-                `Title: ${title}`,
-                `Time: ${fromStr} - ${toStr}`,
-                `Link: ${window.location.href}`,
-                password ? `Password: ${password}` : ""
-              ].filter(Boolean).join("\n");
-              navigator.clipboard.writeText(shareText);
-              alert("Meeting details copied to clipboard!");
-            }}
-            className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-xl transition-all duration-200 cursor-pointer flex items-center gap-1.5 shadow-sm shadow-indigo-500/10"
-          >
-            <svg
-              width="12"
-              height="12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <circle cx="18" cy="5" r="3" />
-              <circle cx="6" cy="12" r="3" />
-              <circle cx="18" cy="19" r="3" />
-              <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
-              <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
-            </svg>
-            Share
-          </button>
-        </div>
-      </header>
-
-      {/* Main Content Area */}
-      <main className="flex-1 flex overflow-hidden relative">
-        {/* Floating Reactions Overlay */}
-        <div className="absolute inset-0 pointer-events-none z-30 overflow-hidden">
-          {reactions.map((r) => (
-            <div
-              key={r.id}
-              className="absolute bottom-10 text-4xl animate-float-up"
-              style={{ left: `${r.x}%` }}
-            >
-              {r.emoji}
-            </div>
-          ))}
-        </div>
-        <div className="flex-1 p-6 flex flex-col items-center justify-center overflow-hidden">
-          <div className="w-full max-w-5xl h-full flex flex-col md:flex-row gap-6 items-center justify-center">
-            {/* Host Video Placeholder */}
-            <div className="flex-1 w-full aspect-video md:h-full bg-gray-50 border border-gray-200/80 rounded-2xl relative overflow-hidden flex items-center justify-center shadow-sm">
-              <div className="absolute inset-0 bg-gradient-to-tr from-gray-100 to-gray-50/50" />
-              <div className="z-10 text-center">
-                <div className="relative inline-block">
-                  <span className="absolute inset-0 rounded-full bg-indigo-500/20 animate-ping duration-1000"></span>
-                  <div className="w-20 h-20 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white text-2xl font-bold shadow-lg border-2 border-indigo-400/40">
-                    {host.substring(0, 2).toUpperCase()}
-                  </div>
-                </div>
-                <div className="mt-3 text-sm font-semibold text-gray-800">{host}</div>
-                <div className="text-[10px] text-indigo-600 font-semibold tracking-wider uppercase mt-0.5">Host</div>
+      <div className="relative z-10 h-screen overflow-hidden px-2 pb-24 pt-16 sm:px-3 sm:pb-28 sm:pt-[4.25rem]">
+        <div className="meet-stage relative h-full">
+          <div className="flex h-full min-h-0 flex-col lg:flex-row">
+            <div className="relative min-h-0 flex-1 p-3 sm:p-4">
+              <div className="absolute left-5 top-5 z-20 hidden w-[170px] flex-col gap-2 sm:flex">
+                <button
+                  type="button"
+                  onClick={() => setMicOn((value) => !value)}
+                  className={`meet-side-card ${micOn ? "" : "meet-side-card--danger"}`}
+                >
+                  <span className="meet-side-card__icon">
+                    {micOn ? <MicIcon /> : <MicOffIcon />}
+                  </span>
+                  <span>
+                    <span className="meet-side-card__title">Microphone</span>
+                    <span className="meet-side-card__meta">
+                      {micOn ? "On" : "Off"}
+                    </span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCameraOn((value) => !value)}
+                  className={`meet-side-card ${cameraOn ? "" : "meet-side-card--danger"}`}
+                >
+                  <span className="meet-side-card__icon">
+                    {cameraOn ? <CameraIcon /> : <CameraOffIcon />}
+                  </span>
+                  <span>
+                    <span className="meet-side-card__title">Camera</span>
+                    <span className="meet-side-card__meta">
+                      {cameraOn ? "On" : "Off"}
+                    </span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSharingScreen((value) => !value)}
+                  className={`meet-side-card ${sharingScreen ? "meet-side-card--accent" : ""}`}
+                >
+                  <span className="meet-side-card__icon">
+                    <ScreenShareIcon />
+                  </span>
+                  <span>
+                    <span className="meet-side-card__title">Present now</span>
+                    <span className="meet-side-card__meta">
+                      {sharingScreen ? "Sharing" : "Share screen"}
+                    </span>
+                  </span>
+                </button>
               </div>
-              <div className="absolute top-4 left-4 z-10 bg-white/90 backdrop-blur px-2.5 py-1 rounded-lg border border-gray-200 text-[10px] font-semibold text-indigo-600 flex items-center gap-1.5 shadow-sm">
-                <div className="flex items-end gap-0.5 h-2">
-                  <span className="w-0.5 bg-indigo-600 animate-[bounce_0.8s_infinite_100ms] h-1.5"></span>
-                  <span className="w-0.5 bg-indigo-600 animate-[bounce_0.8s_infinite_200ms] h-2.5"></span>
-                  <span className="w-0.5 bg-indigo-600 animate-[bounce_0.8s_infinite_300ms] h-2"></span>
-                </div>
-                Speaking
-              </div>
-            </div>
 
-            {/* Local User Video */}
-            <div className="flex-1 w-full aspect-video md:h-full bg-gray-50 border border-gray-200/80 rounded-2xl relative overflow-hidden flex items-center justify-center shadow-sm">
-              {cameraOn && !streamError ? (
-                <video
-                  ref={videoRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  className="w-full h-full object-cover transform -scale-x-100"
-                />
-              ) : (
-                <div className="absolute inset-0 bg-gradient-to-tr from-gray-100 to-gray-50/50 flex items-center justify-center">
+              <div className="meet-video-tile meet-video-tile--host h-full min-h-[360px]">
+                <div className="meet-video-tile__scrim" />
+                <div className="meet-speaking-pill">
+                  <span className="meet-speaking-pill__dot" />
+                  Speaking
+                </div>
+                <div className="relative z-10 flex h-full items-center justify-center">
                   <div className="text-center">
-                    <div className="w-20 h-20 rounded-full bg-gradient-to-br from-gray-250 to-gray-200 flex items-center justify-center text-gray-700 text-2xl font-bold border-2 border-gray-300/40 mx-auto">
-                      ME
+                    <div className="mx-auto flex h-24 w-24 items-center justify-center rounded-full bg-[#3c4043] text-3xl font-medium text-white">
+                      {host.slice(0, 2).toUpperCase()}
                     </div>
-                    <div className="mt-3 text-sm font-semibold text-gray-700">You</div>
-                    <div className="text-[10px] text-gray-500 font-semibold uppercase mt-0.5">Camera Off</div>
+                    <div className="mt-4 text-lg font-medium text-white">
+                      {host}
+                    </div>
+                    <div className="mt-1 text-xs text-white/60">Host</div>
                   </div>
                 </div>
-              )}
-              <div className="absolute top-4 left-4 z-10 bg-white/90 backdrop-blur px-2.5 py-1 rounded-lg border border-gray-200 text-[10px] font-semibold text-gray-800 shadow-sm">
-                You
+                <div className="meet-video-badge">{host}</div>
+                {sharingScreen ? (
+                  <div className="absolute inset-x-5 bottom-5 z-10 rounded-2xl border border-white/10 bg-[#202124]/92 px-4 py-3 text-sm text-white/78">
+                    Screen share is active. Shared content would take focus here
+                    in the live room.
+                  </div>
+                ) : null}
               </div>
-              {!micOn && (
-                <div className="absolute top-4 right-4 z-10 bg-red-500/80 backdrop-blur p-1.5 rounded-lg text-white">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
-                    <line x1="1" y1="1" x2="23" y2="23" />
-                    <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6" />
-                    <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23" />
-                    <line x1="12" y1="19" x2="12" y2="23" />
-                    <line x1="8" y1="23" x2="16" y2="23" />
-                  </svg>
+
+              <div className="absolute bottom-5 right-5 z-20 w-[160px] sm:w-[220px]">
+                <div className="meet-video-tile aspect-video">
+                  {cameraOn && !streamError ? (
+                    <video
+                      ref={videoRef}
+                      autoPlay
+                      playsInline
+                      muted
+                      className="h-full w-full object-cover [transform:scaleX(-1)]"
+                    />
+                  ) : (
+                    <div className="flex h-full items-center justify-center bg-[#2b2c2e]">
+                      <div className="text-center">
+                        <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-[#3c4043] text-xl font-medium text-white">
+                          ME
+                        </div>
+                        <div className="mt-3 text-sm font-medium text-white">
+                          You
+                        </div>
+                        <div className="mt-1 text-[11px] text-white/52">
+                          {streamError || "Camera off"}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  <div className="meet-video-badge">You</div>
+                  {!micOn ? (
+                    <div className="absolute right-3 top-3 rounded-full bg-[#ea4335] p-2 text-white">
+                      <MicOffIcon />
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+
+            <aside
+              className={`meet-chat-panel ${
+                showChat
+                  ? "translate-y-0 opacity-100"
+                  : "pointer-events-none translate-y-4 opacity-0 lg:translate-x-6 lg:translate-y-0"
+              }`}
+            >
+              <div className="flex items-center justify-between gap-3 border-b border-white/8 px-4 py-4">
+                <div>
+                  <div className="text-sm font-medium text-white">
+                    In-call messages
+                  </div>
+                  <div className="text-xs text-white/48">Chat and people</div>
+                </div>
+                <button
+                  type="button"
+                  className="rounded-full bg-white/8 p-2 text-white/70 transition hover:bg-white/12 hover:text-white lg:hidden"
+                  onClick={() => setShowChat(false)}
+                >
+                  <CloseIcon />
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 px-4 pt-4">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("chat")}
+                  className={`meet-tab ${activeTab === "chat" ? "meet-tab--active" : ""}`}
+                >
+                  Chat
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("people")}
+                  className={`meet-tab ${activeTab === "people" ? "meet-tab--active" : ""}`}
+                >
+                  People
+                </button>
+              </div>
+
+              {activeTab === "chat" ? (
+                <>
+                  <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+                    <div className="flex flex-col gap-4">
+                      {messages.map((message) => (
+                        <div
+                          key={message.id}
+                          className={`flex flex-col ${message.isMe ? "items-end" : "items-start"}`}
+                        >
+                          <div className="mb-1 flex items-center gap-2 text-[11px] text-white/42">
+                            <span>{message.isMe ? "You" : message.sender}</span>
+                            <span>{message.timestamp}</span>
+                          </div>
+                          <div
+                            className={`max-w-[88%] rounded-3xl px-4 py-3 text-sm leading-6 ${
+                              message.isMe
+                                ? "bg-[#8ab4f8] text-[#202124]"
+                                : "bg-white/8 text-white/82"
+                            }`}
+                          >
+                            {message.text}
+                          </div>
+                        </div>
+                      ))}
+                      <div ref={chatEndRef} />
+                    </div>
+                  </div>
+                  <form
+                    onSubmit={handleSendMessage}
+                    className="border-t border-white/8 px-4 py-4"
+                  >
+                    <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/6 px-3 py-2">
+                      <input
+                        type="text"
+                        value={inputText}
+                        onChange={(event) => setInputText(event.target.value)}
+                        placeholder="Send a message to everyone"
+                        className="min-w-0 flex-1 bg-transparent px-1 text-sm text-white outline-none placeholder:text-white/34"
+                      />
+                      <button
+                        type="submit"
+                        className="flex h-10 w-10 items-center justify-center rounded-full bg-[#8ab4f8] text-[#202124] transition hover:bg-[#9ec1fb]"
+                      >
+                        <SendIcon />
+                      </button>
+                    </div>
+                  </form>
+                </>
+              ) : (
+                <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-4 py-4">
+                  <ParticipantCard name={host} subtitle="Host" accent />
+                  <ParticipantCard
+                    name="You"
+                    subtitle={slug ? `Joined via ${slug}` : "Participant"}
+                  />
                 </div>
               )}
+            </aside>
+          </div>
+        </div>
+      </div>
+
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-40 px-4 pb-5 sm:px-6 sm:pb-6">
+        <div className="mx-auto flex max-w-[1500px] items-end justify-between gap-3">
+          <div className="pointer-events-auto hidden rounded-full border border-white/8 bg-[#202124]/90 px-4 py-2.5 text-xs text-white/50 lg:block">
+            {meetingLabel}
+          </div>
+
+          <div className="meet-dock pointer-events-auto mx-auto">
+            <ControlFab
+              active={micOn}
+              onClick={() => setMicOn((value) => !value)}
+              title="Toggle mic"
+            >
+              {micOn ? <MicIcon /> : <MicOffIcon />}
+            </ControlFab>
+            <ControlFab
+              active={cameraOn}
+              onClick={() => setCameraOn((value) => !value)}
+              title="Toggle camera"
+            >
+              {cameraOn ? <CameraIcon /> : <CameraOffIcon />}
+            </ControlFab>
+            <ControlFab
+              active={sharingScreen}
+              accent={sharingScreen}
+              onClick={() => setSharingScreen((value) => !value)}
+              title="Toggle screen share"
+            >
+              <ScreenShareIcon />
+            </ControlFab>
+            <ControlFab
+              active={showChat}
+              onClick={() => setShowChat((value) => !value)}
+              title="Toggle chat"
+            >
+              <ChatIcon />
+            </ControlFab>
+            <ReactionPicker
+              open={showReactions}
+              setOpen={setShowReactions}
+              onSelect={addReaction}
+            />
+            <a
+              href="/home"
+              title="Leave"
+              aria-label="Leave"
+              className="ml-1 flex h-12 w-12 items-center justify-center rounded-full bg-[#ea4335] text-sm font-medium text-white transition hover:bg-[#f15d52]"
+            >
+              <LeaveIcon />
+            </a>
+          </div>
+
+          <div className="pointer-events-auto hidden items-center gap-2 xl:flex">
+            {hasConfig ? (
+              <button
+                type="button"
+                className="meet-chip"
+                onClick={onConfigureDemo}
+              >
+                <SparkIcon />
+              </button>
+            ) : null}
+            <div className="rounded-full border border-white/8 bg-[#202124]/90 px-4 py-2.5 text-xs text-white/50">
+              {formatTime(startTime)} - {formatTime(endTime)}
             </div>
           </div>
         </div>
-
-        {/* Sidebar */}
-        {showChat && (
-          <aside className="w-80 border-l border-gray-200 bg-gray-50/90 backdrop-blur flex flex-col animate-in slide-in-from-right duration-300 z-10">
-            <div className="h-14 border-b border-gray-200/60 flex items-center px-4">
-              <button
-                onClick={() => setActiveTab("chat")}
-                className={`flex-1 py-2 text-center text-xs font-semibold rounded-lg transition-colors cursor-pointer ${
-                  activeTab === "chat"
-                    ? "bg-white text-indigo-600 border border-gray-200 shadow-sm"
-                    : "text-gray-500 hover:text-gray-750"
-                }`}
-              >
-                Chat
-              </button>
-              <button
-                onClick={() => setActiveTab("people")}
-                className={`flex-1 py-2 text-center text-xs font-semibold rounded-lg transition-colors cursor-pointer ${
-                  activeTab === "people"
-                    ? "bg-white text-indigo-600 border border-gray-200 shadow-sm"
-                    : "text-gray-500 hover:text-gray-750"
-                }`}
-              >
-                People (2)
-              </button>
-            </div>
-
-            {activeTab === "chat" ? (
-              <>
-                <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
-                  {messages.map((msg) => (
-                    <div
-                      key={msg.id}
-                      className={`flex flex-col max-w-[85%] ${msg.isMe ? "self-end items-end" : "self-start items-start"}`}
-                    >
-                      <div className="flex items-center gap-1.5 mb-1">
-                        <span className="text-[10px] font-semibold text-gray-500">{msg.isMe ? "You" : msg.sender}</span>
-                        <span className="text-[8px] text-gray-400">{msg.timestamp}</span>
-                      </div>
-                      <div
-                        className={`rounded-2xl px-3.5 py-2 text-xs leading-relaxed ${
-                          msg.isMe
-                            ? "bg-indigo-600 text-white rounded-tr-none"
-                            : "bg-white text-gray-800 rounded-tl-none border border-gray-200 shadow-sm"
-                        }`}
-                      >
-                        {msg.text}
-                      </div>
-                    </div>
-                  ))}
-                  <div ref={chatEndRef} />
-                </div>
-                <form onSubmit={handleSendMessage} className="p-4 border-t border-gray-200 bg-gray-50/50 flex gap-2">
-                  <input
-                    type="text"
-                    value={inputText}
-                    onChange={(e) => setInputText(e.target.value)}
-                    placeholder="Type a message..."
-                    className="flex-1 bg-white border border-gray-300 rounded-xl px-3.5 py-2 text-xs text-gray-900 focus:outline-none focus:border-indigo-500 transition-colors"
-                  />
-                  <button
-                    type="submit"
-                    className="w-8 h-8 rounded-xl bg-indigo-600 hover:bg-indigo-700 flex items-center justify-center text-white transition-colors cursor-pointer"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                      <line x1="22" y1="2" x2="11" y2="13" />
-                      <polygon points="22 2 15 22 11 13 2 9 22 2" />
-                    </svg>
-                  </button>
-                </form>
-              </>
-            ) : (
-              <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-3">
-                <div className="flex items-center justify-between p-2 rounded-xl bg-white border border-gray-200 shadow-xs">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-8 h-8 rounded-full bg-indigo-50 border border-indigo-100 flex items-center justify-center text-xs font-bold text-indigo-600">
-                      {host.substring(0, 2).toUpperCase()}
-                    </div>
-                    <div>
-                      <div className="text-xs font-semibold text-gray-800">{host}</div>
-                      <div className="text-[9px] text-gray-500 font-medium">Host</div>
-                    </div>
-                  </div>
-                  <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-                </div>
-                <div className="flex items-center justify-between p-2 rounded-xl bg-white border border-gray-200 shadow-xs">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-8 h-8 rounded-full bg-gray-100 border border-gray-200/80 flex items-center justify-center text-xs font-bold text-gray-600">
-                      ME
-                    </div>
-                    <div>
-                      <div className="text-xs font-semibold text-gray-800">You</div>
-                      <div className="text-[9px] text-gray-500 font-medium">Participant</div>
-                    </div>
-                  </div>
-                  <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-                </div>
-              </div>
-            )}
-          </aside>
-        )}
-      </main>
-
-      {/* footer controls */}
-      <footer className="h-20 bg-white/95 border-t border-gray-200/80 flex items-center justify-center gap-4 relative z-10 px-6">
-        <div className="absolute left-6 text-[10px] font-semibold text-gray-500 tracking-wider hidden sm:block">
-          MEETING ID: <span className="font-mono">{slug || meetingId}</span>
-        </div>
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => setMicOn(!micOn)}
-            className={`w-11 h-11 rounded-full flex items-center justify-center transition-all duration-200 cursor-pointer shadow border ${
-              micOn
-                ? "bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100 hover:text-gray-900"
-                : "bg-red-500/10 border-red-500/20 text-red-500 hover:bg-red-550 hover:text-white"
-            }`}
-            title={micOn ? "Mute Microphone" : "Unmute Microphone"}
-          >
-            {micOn ? (
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
-                <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-                <line x1="12" y1="19" x2="12" y2="23" />
-                <line x1="8" y1="23" x2="16" y2="23" />
-              </svg>
-            ) : (
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <line x1="1" y1="1" x2="23" y2="23" />
-                <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6" />
-                <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23" />
-                <line x1="12" y1="19" x2="12" y2="23" />
-                <line x1="8" y1="23" x2="16" y2="23" />
-              </svg>
-            )}
-          </button>
-
-          <button
-            onClick={() => setCameraOn(!cameraOn)}
-            className={`w-11 h-11 rounded-full flex items-center justify-center transition-all duration-200 cursor-pointer shadow border ${
-              cameraOn
-                ? "bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100 hover:text-gray-900"
-                : "bg-red-500/10 border-red-500/20 text-red-500 hover:bg-red-550 hover:text-white"
-            }`}
-            title={cameraOn ? "Turn Camera Off" : "Turn Camera On"}
-          >
-            {cameraOn ? (
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M23 7l-7 5 7 5V7z" />
-                <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
-              </svg>
-            ) : (
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M16 16v1a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2m5.66 0H14a2 2 0 0 1 2 2v3.34l1 1L23 7v10" />
-                <line x1="1" y1="1" x2="23" y2="23" />
-              </svg>
-            )}
-          </button>
-
-          <button
-            onClick={() => setSharingScreen(!sharingScreen)}
-            className={`w-11 h-11 rounded-full flex items-center justify-center transition-all duration-200 cursor-pointer shadow border ${
-              sharingScreen
-                ? "bg-indigo-600 border-indigo-500 text-white"
-                : "bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100 hover:text-gray-900"
-            }`}
-            title={sharingScreen ? "Stop Sharing Screen" : "Share Screen"}
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
-              <line x1="8" y1="21" x2="16" y2="21" />
-              <line x1="12" y1="17" x2="12" y2="21" />
-            </svg>
-          </button>
-        </div>
-
-        <a
-          href="/home"
-          className="px-5 h-11 rounded-full bg-red-600 hover:bg-red-755 text-white text-xs font-semibold flex items-center gap-1.5 shadow-lg shadow-red-500/10 hover:shadow-xl transition-all duration-200"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-            <path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 2.59 3.4z" />
-          </svg>
-          Leave Call
-        </a>
-
-        {/* Reactions Button & Popover */}
-        <div className="absolute right-20 z-40">
-          <button
-            onClick={() => setShowReactions(!showReactions)}
-            className={`w-11 h-11 rounded-full flex items-center justify-center transition-all duration-200 cursor-pointer shadow border ${
-              showReactions
-                ? "bg-indigo-50 border-indigo-200 text-indigo-600"
-                : "bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100 hover:text-gray-900"
-            }`}
-            title="Reactions"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="12" r="10" />
-              <path d="M8 14s1.5 2 4 2 4-2 4-2" />
-              <line x1="9" y1="9" x2="9.01" y2="9" />
-              <line x1="15" y1="9" x2="15.01" y2="9" />
-            </svg>
-          </button>
-          {showReactions && (
-            <>
-              <div className="fixed inset-0 z-40" onClick={() => setShowReactions(false)} />
-              <div className="absolute bottom-14 left-1/2 -translate-x-1/2 bg-white border border-gray-200/80 rounded-2xl shadow-xl p-2.5 flex gap-2 z-50 animate-in fade-in slide-in-from-bottom-2 duration-150">
-                {["👍", "❤️", "😂", "🎉", "😮", "👏"].map((emoji) => (
-                  <button
-                    key={emoji}
-                    onClick={() => {
-                      addReaction(emoji);
-                      setShowReactions(false);
-                    }}
-                    className="w-8 h-8 rounded-lg hover:bg-gray-100 flex items-center justify-center text-xl transition-transform active:scale-125 cursor-pointer"
-                  >
-                    {emoji}
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
-
-        <button
-          onClick={() => setShowChat(!showChat)}
-          className={`absolute right-6 w-11 h-11 rounded-full flex items-center justify-center transition-all duration-200 cursor-pointer shadow border ${
-            showChat
-              ? "bg-indigo-50 border-indigo-200 text-indigo-600 hover:bg-indigo-100"
-              : "bg-gray-50 border-gray-200 text-gray-500 hover:text-gray-700 hover:bg-gray-100"
-          }`}
-          title="Toggle Chat Sidebar"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-          </svg>
-        </button>
-      </footer>
+      </div>
     </div>
+  );
+}
+
+function ClockIcon() {
+  return (
+    <svg
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+    >
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 3" />
+    </svg>
+  );
+}
+
+function MicIcon() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+    >
+      <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+      <path d="M12 19v3" />
+      <path d="M8 22h8" />
+    </svg>
+  );
+}
+
+function MicOffIcon() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+    >
+      <path d="m2 2 20 20" />
+      <path d="M9 9v3a3 3 0 0 0 5.17 2.08" />
+      <path d="M15 6.34V5a3 3 0 0 0-5.74-1.28" />
+      <path d="M17 10v2a7 7 0 0 1-.84 3.34" />
+      <path d="M7.88 7.88A6.97 6.97 0 0 0 5 12v0a7 7 0 0 0 12.95 3.67" />
+      <path d="M12 19v3" />
+      <path d="M8 22h8" />
+    </svg>
+  );
+}
+
+function CameraIcon() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+    >
+      <path d="m16 7 5-3v16l-5-3" />
+      <rect x="3" y="6" width="13" height="12" rx="2" />
+    </svg>
+  );
+}
+
+function CameraOffIcon() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+    >
+      <path d="m2 2 20 20" />
+      <path d="M10.66 6H5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h11a2 2 0 0 0 1.64-.86" />
+      <path d="m16 7 5-3v11" />
+    </svg>
+  );
+}
+
+function ScreenShareIcon() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+    >
+      <rect x="3" y="4" width="18" height="12" rx="2" />
+      <path d="M8 20h8" />
+      <path d="M12 16v4" />
+    </svg>
+  );
+}
+
+function ChatIcon() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+    >
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+
+function SendIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+    >
+      <path d="M22 2 11 13" />
+      <path d="m22 2-7 20-4-9-9-4Z" />
+    </svg>
+  );
+}
+
+function ShareIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+    >
+      <circle cx="18" cy="5" r="3" />
+      <circle cx="6" cy="12" r="3" />
+      <circle cx="18" cy="19" r="3" />
+      <path d="m8.59 13.51 6.83 3.98" />
+      <path d="m15.41 6.51-6.82 3.98" />
+    </svg>
+  );
+}
+
+function LinkIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+    >
+      <rect x="9" y="9" width="13" height="13" rx="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </svg>
+  );
+}
+
+function ReactionIcon() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+    >
+      <circle cx="12" cy="12" r="10" />
+      <path d="M8 14s1.5 2 4 2 4-2 4-2" />
+      <path d="M9 9h.01" />
+      <path d="M15 9h.01" />
+    </svg>
+  );
+}
+
+function LeaveIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+    >
+      <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.86 19.86 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.86 19.86 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92Z" />
+    </svg>
+  );
+}
+
+function LockIcon() {
+  return (
+    <svg
+      width="24"
+      height="24"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+    >
+      <rect x="3" y="11" width="18" height="11" rx="2" />
+      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+    >
+      <path d="m18 6-12 12" />
+      <path d="m6 6 12 12" />
+    </svg>
+  );
+}
+
+function SparkIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+    >
+      <path d="m12 3 1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3Z" />
+    </svg>
   );
 }

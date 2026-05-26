@@ -20,6 +20,7 @@ export interface CreateBookingState {
   bookingId?: number;
   bookingSlug?: string;
   bookingPassword?: string | null;
+  bookingRequireSignIn?: boolean;
 }
 
 export interface BookingResponse {
@@ -33,6 +34,7 @@ export interface BookingResponse {
   status: string; // "active" or "cancelled"
   slug: string | null;
   password?: string | null;
+  requireSignIn: boolean;
 }
 
 /** Fetch bookings that overlap with the absolute start and end ISO timestamps */
@@ -51,6 +53,7 @@ export async function getBookings(startISO: string, endISO: string): Promise<Boo
       status: bookings.status,
       slug: bookings.slug,
       password: bookings.password,
+      requireSignIn: bookings.requireSignIn,
       username: users.username,
     })
     .from(bookings)
@@ -74,6 +77,7 @@ export async function getBookings(startISO: string, endISO: string): Promise<Boo
     status: r.status,
     slug: r.slug,
     password: r.password,
+    requireSignIn: r.requireSignIn,
   }));
 }
 
@@ -93,6 +97,8 @@ export async function createBooking(
   const startTimeISO = (formData.get("startTime") as string | null) ?? "";
   const endTimeISO = (formData.get("endTime") as string | null) ?? "";
   const password = (formData.get("password") as string | null)?.trim() || null;
+  const requireSignIn =
+    (formData.get("requireSignIn") as string | null) === "true";
 
   const errors: CreateBookingState["errors"] = {};
   if (!title) {
@@ -188,6 +194,7 @@ export async function createBooking(
       status: "active",
       slug,
       password: room === "Online Meet" ? password : null,
+      requireSignIn: room === "Online Meet" ? requireSignIn : false,
     }).returning({ id: bookings.id, slug: bookings.slug, password: bookings.password });
     newBooking = result[0];
   } catch (error) {
@@ -203,6 +210,7 @@ export async function createBooking(
     bookingId: newBooking?.id,
     bookingSlug: newBooking?.slug ?? undefined,
     bookingPassword: newBooking?.password ?? undefined,
+    bookingRequireSignIn: requireSignIn,
   };
 }
 

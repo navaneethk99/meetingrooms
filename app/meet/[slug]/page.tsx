@@ -1,6 +1,8 @@
 import { db } from "@/db";
 import { bookings, users } from "@/db/schema";
 import { eq } from "drizzle-orm";
+import { cookies } from "next/headers";
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import MeetClient from "./MeetClient";
 import { getParticipantToken } from "@/app/actions/livekit";
@@ -12,6 +14,8 @@ interface PageProps {
 export default async function MeetPage({ params }: PageProps) {
   const { slug } = await params;
   console.log("MeetPage hit with slug:", slug);
+  const cookieStore = await cookies();
+  const viewerEmail = cookieStore.get("mr_email")?.value ?? null;
 
   let booking = null;
   let hostUsername: string | null = null;
@@ -52,6 +56,42 @@ export default async function MeetPage({ params }: PageProps) {
 
   if (!booking) {
     notFound();
+  }
+
+  if (booking.requireSignIn && !viewerEmail) {
+    return (
+      <div className="min-h-screen bg-white text-gray-800 flex items-center justify-center flex-col gap-4 px-4 font-sans">
+        <div className="max-w-md w-full text-center bg-gray-50 border border-gray-200 rounded-2xl p-8 shadow-sm">
+          <div className="w-16 h-16 bg-amber-500/10 border border-amber-500/20 text-amber-600 rounded-full flex items-center justify-center mx-auto mb-5">
+            <svg
+              width="28"
+              height="28"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <circle cx="12" cy="12" r="9" />
+              <path d="M12 8v4" />
+              <path d="M12 16h.01" />
+            </svg>
+          </div>
+          <h1 className="text-xl font-bold text-gray-900 mb-2">Sign-in Required</h1>
+          <p className="text-gray-500 text-sm mb-6 leading-relaxed">
+            This meeting is locked for external participants. Sign in with an
+            approved account to continue.
+          </p>
+          <Link
+            href="/"
+            className="inline-block w-full py-3 bg-gray-900 hover:bg-gray-800 text-white text-sm font-semibold rounded-xl transition-all duration-200"
+          >
+            Go to Sign In
+          </Link>
+        </div>
+      </div>
+    );
   }
 
   // Only allow active meetings
@@ -101,6 +141,9 @@ export default async function MeetPage({ params }: PageProps) {
       slug={booking.slug}
       title={booking.title}
       host={hostUsername || booking.bookedBy}
+      hostEmail={booking.bookedBy}
+      viewerIsHost={viewerEmail === booking.bookedBy}
+      roomName={roomName}
       startTime={booking.startTime.toISOString()}
       endTime={booking.endTime.toISOString()}
       livekitToken={livekitToken}

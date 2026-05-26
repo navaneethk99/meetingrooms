@@ -22,6 +22,7 @@ export const bookings = pgTable("bookings", {
   status: text("status").default("active").notNull(), // "active" or "cancelled"
   slug: text("slug").unique(),
   password: text("password"),
+  requireSignIn: boolean("require_sign_in").default(false).notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
